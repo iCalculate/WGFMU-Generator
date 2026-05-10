@@ -20,15 +20,42 @@ def configure_qt_plugin_path() -> None:
     Qt plugin path even though PySide6 ships plugins under
     `site-packages/PySide6/plugins`. Without this bootstrap, Qt cannot find the
     `platforms/qwindows.dll` backend and the application exits at startup.
+    PyInstaller one-file builds unpack PySide6 into `sys._MEIPASS`, so frozen
+    candidates must be checked explicitly as well.
     """
 
+    candidates: list[Path] = []
+    if getattr(sys, "frozen", False):
+        bundle_dir = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+        candidates.extend(
+            [
+                bundle_dir / "PySide6" / "plugins",
+                bundle_dir / "PySide6" / "Qt" / "plugins",
+                bundle_dir / "plugins",
+            ]
+        )
+        # PyInstaller hook layouts vary by PySide6 version. A shallow fallback
+        # keeps the EXE resilient without hardcoding one exact internal layout.
+        try:
+            candidates.extend(path.parent.parent for path in bundle_dir.glob("**/platforms/qwindows.dll"))
+        except OSError:
+            pass
+
     pyside_dir = Path(PySide6.__file__).resolve().parent
-    plugins_dir = pyside_dir / "plugins"
-    platforms_dir = plugins_dir / "platforms"
-    if platforms_dir.exists():
-        os.environ.setdefault("QT_PLUGIN_PATH", str(plugins_dir))
-        os.environ.setdefault("QT_QPA_PLATFORM_PLUGIN_PATH", str(platforms_dir))
-        QCoreApplication.addLibraryPath(str(plugins_dir))
+    candidates.extend([pyside_dir / "plugins", pyside_dir / "Qt" / "plugins"])
+
+    for plugins_dir in candidates:
+        platforms_dir = plugins_dir / "platforms"
+        if platforms_dir.exists():
+            os.environ["QT_PLUGIN_PATH"] = str(plugins_dir)
+            os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = str(platforms_dir)
+            QCoreApplication.addLibraryPath(str(plugins_dir))
+            if hasattr(os, "add_dll_directory"):
+                try:
+                    os.add_dll_directory(str(Path(PySide6.__file__).resolve().parent))
+                except OSError:
+                    pass
+            break
 
 
 def main() -> int:
