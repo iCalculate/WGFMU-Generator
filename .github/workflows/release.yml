@@ -30,16 +30,7 @@ jobs:
           pip install -r requirements.txt
 
       - name: Build EXE
-        run: >
-          pyinstaller
-          --noconfirm
-          --clean
-          --onefile
-          --windowed
-          --name "WGFMU Designer"
-          --collect-all PySide6
-          --collect-all pyqtgraph
-          main.py
+        run: pyinstaller "WGFMU Designer.spec" --noconfirm --clean
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
