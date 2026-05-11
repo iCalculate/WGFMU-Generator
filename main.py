@@ -15,6 +15,14 @@ from core.cli_log import color, log, print_banner
 from gui.main_window import MainWindow
 
 
+def resource_path(relative_path: str) -> Path:
+    """Return a resource path for source runs and PyInstaller bundles."""
+
+    if getattr(sys, "frozen", False):
+        return Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent)) / relative_path
+    return Path(__file__).resolve().parent / relative_path
+
+
 def configure_qt_plugin_path() -> None:
     """Point Qt at PySide6's bundled plugins before QApplication exists.
 
@@ -73,6 +81,14 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("WGFMU Designer")
     app.setOrganizationName("WGFMU Designer")
+    icon_path = resource_path("assets/app_icon.ico")
+    if icon_path.exists():
+        from PySide6.QtGui import QIcon
+
+        app.setWindowIcon(QIcon(str(icon_path)))
+        log("OK", "Application icon loaded", detail=str(icon_path))
+    else:
+        log("WARN", "Application icon missing", detail=str(icon_path))
     log("INFO", "Building main window")
     window = MainWindow()
     window.show()
@@ -87,5 +103,7 @@ if __name__ == "__main__":
         raise SystemExit(main())
     except Exception as exc:
         log("ERROR", f"Startup failed: {exc}")
-        print(color(traceback.format_exc(), "red"))
+        stream = sys.stdout or sys.__stdout__
+        if stream is not None:
+            print(color(traceback.format_exc(), "red"), file=stream)
         raise

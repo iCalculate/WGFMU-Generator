@@ -28,8 +28,13 @@ LOGO = r"""
 """
 
 
+def _output_stream():
+    return sys.stdout or sys.__stdout__
+
+
 def _supports_color() -> bool:
-    if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
+    stream = _output_stream()
+    if stream is None or not stream.isatty() or os.environ.get("NO_COLOR"):
         return False
     if os.name != "nt":
         return True
@@ -56,12 +61,18 @@ def color(text: str, name: str) -> str:
 
 
 def print_banner() -> None:
-    print(color(LOGO, "cyan"))
-    print(color("  Keysight B1500A / B1530A WGFMU waveform editor", "dim"))
-    print()
+    stream = _output_stream()
+    if stream is None:
+        return
+    print(color(LOGO, "cyan"), file=stream)
+    print(color("  Keysight B1500A / B1530A WGFMU waveform editor", "dim"), file=stream)
+    print(file=stream)
 
 
 def log(level: str, message: str, *, detail: str | None = None) -> None:
+    stream = _output_stream()
+    if stream is None:
+        return
     palette = {
         "INFO": "cyan",
         "OK": "green",
@@ -71,6 +82,6 @@ def log(level: str, message: str, *, detail: str | None = None) -> None:
     }
     label = color(f"[{level:<5}]", palette.get(level, "cyan"))
     timestamp = color(datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "dim")
-    print(f"{timestamp} {label} {message}", flush=True)
+    print(f"{timestamp} {label} {message}", file=stream, flush=True)
     if detail:
-        print(color(f"{'':19} {'':7} {detail}", "dim"), flush=True)
+        print(color(f"{'':19} {'':7} {detail}", "dim"), file=stream, flush=True)

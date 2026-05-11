@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-datas = []
+datas = [('assets/app_icon.ico', 'assets')]
 binaries = []
 hiddenimports = []
 
@@ -60,6 +60,7 @@ a = Analysis(
         'dask',
         'docutils',
         'imageio',
+        'h5py',
         'jedi',
         'jinja2',
         'lxml',
@@ -69,7 +70,9 @@ a = Analysis(
         'notebook',
         'numba',
         'panel',
+        'pandas',
         'plotly',
+        'pyarrow',
         'pytest',
         'scipy',
         'skimage',
@@ -102,4 +105,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon='assets/app_icon.ico',
 )

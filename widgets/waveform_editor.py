@@ -430,8 +430,16 @@ class WaveformEditor(pg.PlotWidget):
             next_project = self.project.clone()
             points = next_project.waveforms[channel]
             if right_index < len(points):
-                left_t, left_v_next = self._snap(left_t_start + delta_t, left_v_start + delta_v)
-                right_t, right_v_next = self._snap(right_t_start + delta_t, right_v_start + delta_v)
+                if axis == "x":
+                    left_t = self._snap_time(left_t_start + delta_t)
+                    right_t = self._snap_time(right_t_start + delta_t)
+                    left_v_next = left_v_start
+                    right_v_next = right_v_start
+                else:
+                    left_t = left_t_start
+                    right_t = right_t_start
+                    left_v_next = self._snap_voltage(left_v_start + delta_v)
+                    right_v_next = self._snap_voltage(right_v_start + delta_v)
                 points[left_index] = WaveformPoint(left_t, left_v_next)
                 points[right_index] = WaveformPoint(right_t, right_v_next)
                 self.project = next_project
@@ -466,13 +474,25 @@ class WaveformEditor(pg.PlotWidget):
     def _snap(self, time_value: float, voltage: float) -> tuple[float, float]:
         settings = self.project.settings
         if settings.snap_enabled:
-            time_step = self._active_snap_time()
-            voltage_step = self._active_snap_voltage()
-            if time_step > 0:
-                time_value = round(time_value / time_step) * time_step
-            if voltage_step > 0:
-                voltage = round(voltage / voltage_step) * voltage_step
+            time_value = self._snap_time(time_value)
+            voltage = self._snap_voltage(voltage)
         return max(0.0, time_value), voltage
+
+    def _snap_time(self, time_value: float) -> float:
+        if not self.project.settings.snap_enabled:
+            return max(0.0, time_value)
+        time_step = self._active_snap_time()
+        if time_step > 0:
+            time_value = round(time_value / time_step) * time_step
+        return max(0.0, time_value)
+
+    def _snap_voltage(self, voltage: float) -> float:
+        if not self.project.settings.snap_enabled:
+            return voltage
+        voltage_step = self._active_snap_voltage()
+        if voltage_step > 0:
+            voltage = round(voltage / voltage_step) * voltage_step
+        return voltage
 
     def _active_snap_time(self) -> float:
         settings = self.project.settings
@@ -551,10 +571,13 @@ class WaveformEditor(pg.PlotWidget):
                 axis = self._drag_axis(channel, start_t, start_v, time_value, voltage)
                 self._point_drag = (channel, index, start_t, start_v, axis)
             if axis == "x":
+                time_value = self._snap_time(time_value)
                 voltage = start_v
             else:
                 time_value = start_t
-        time_value, voltage = self._snap(time_value, voltage)
+                voltage = self._snap_voltage(voltage)
+        else:
+            time_value, voltage = self._snap(time_value, voltage)
         next_project.waveforms[channel][index] = WaveformPoint(time_value, voltage)
         # Do not sort during drag; stable point identity makes editing feel much
         # smoother. The final committed project is sorted in _finish_drag_point.

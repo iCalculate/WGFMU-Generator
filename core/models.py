@@ -11,7 +11,6 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 import numpy as np
-import pandas as pd
 
 
 CHANNELS = ("ch1", "ch2")
@@ -94,31 +93,6 @@ class Project:
         step = minimum_step if minimum_step and minimum_step > 0 else self.settings.minimum_point_spacing
         for channel in CHANNELS:
             self.waveforms[channel] = make_monotonic_points(self.waveforms[channel], step)
-
-    def waveform_df(self, channel: str) -> pd.DataFrame:
-        """Return one channel as a DataFrame with WGFMU column names."""
-
-        points = self.waveforms.get(channel, [])
-        return pd.DataFrame(
-            [{"Time [s]": point.time, "Voltage [V]": point.voltage} for point in points]
-        )
-
-    def measurement_df(self) -> pd.DataFrame:
-        """Return measurement events as a DataFrame."""
-
-        return pd.DataFrame(
-            [
-                {
-                    "tm [s]": event.tm,
-                    "Points": event.points,
-                    "Interval [s]": event.interval,
-                    "Averaging [s]": event.averaging,
-                    "Ch1 Range": event.ch1_range,
-                    "Ch2 Range": event.ch2_range,
-                }
-                for event in self.measurements
-            ]
-        )
 
     def duration(self) -> float:
         """Return the largest waveform time across channels."""

@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QKeySequence, QUndoCommand, QUndoStack
+from PySide6.QtGui import QAction, QIcon, QKeySequence, QUndoCommand, QUndoStack
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -68,6 +68,9 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("WGFMU Designer")
+        icon = QApplication.instance().windowIcon()
+        if not icon.isNull():
+            self.setWindowIcon(QIcon(icon))
         self.resize(1400, 900)
         self.project = Project()
         self.current_path: Path | None = None
