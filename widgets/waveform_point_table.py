@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core.cli_log import log
 from core.models import CHANNELS, Project, WaveformPoint
 from core.si_units import format_si, parse_si
 from exporters import wgfmu_exporter
@@ -105,6 +106,7 @@ class WaveformPointTable(QWidget):
         next_project = self.project.clone()
         next_project.waveforms[self.channel][row] = WaveformPoint(max(0.0, time_value), voltage)
         next_project.enforce_monotonic_waveforms(next_project.settings.minimum_point_spacing)
+        log("INFO", "Waveform table point edited", detail=f"{self.channel.upper()} row={row}")
         self.projectChanged.emit(next_project)
 
     def _add_point(self) -> None:
@@ -114,6 +116,7 @@ class WaveformPointTable(QWidget):
         voltage = points[-1].voltage if points else 0.0
         points.append(WaveformPoint(time_value, voltage))
         next_project.enforce_monotonic_waveforms(next_project.settings.minimum_point_spacing)
+        log("OK", "Waveform table point added", detail=f"{self.channel.upper()} t={time_value:.6g}s V={voltage:.6g}")
         self.projectChanged.emit(next_project)
 
     def _delete_selected(self) -> None:
@@ -125,7 +128,9 @@ class WaveformPointTable(QWidget):
         for row in rows:
             if 0 <= row < len(points):
                 points.pop(row)
+        log("OK", "Waveform table point deleted", detail=f"{self.channel.upper()} removed={len(rows)}")
         self.projectChanged.emit(next_project)
 
     def _copy_waveform(self) -> None:
         QApplication.clipboard().setText(wgfmu_exporter.waveform_text(self.project, self.channel))
+        log("OK", "Waveform WGFMU text copied", detail=self.channel.upper())

@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core.cli_log import log
 from core.models import MeasurementEvent, Project
 from core.si_units import format_si, parse_si
 from exporters import wgfmu_exporter
@@ -40,13 +41,13 @@ class MeasurementTable(QWidget):
         self.add_button = QPushButton("Add Row")
         self.remove_button = QPushButton("Remove Selected")
         self.copy_button = QPushButton("Copy WGFMU Text")
-        self.show_overlay_check = QCheckBox("Show in Plot")
+        self.show_overlay_check = QCheckBox("Show measure points in plot")
         self.show_overlay_check.setChecked(True)
         self.add_button.clicked.connect(self._add_row)
         self.remove_button.clicked.connect(self._remove_selected)
         self.copy_button.clicked.connect(self._copy_measurements)
         self.show_overlay_check.stateChanged.connect(
-            lambda state: self.overlayVisibilityChanged.emit(state == Qt.Checked)
+            lambda _state: self.overlayVisibilityChanged.emit(self.show_overlay_check.isChecked())
         )
 
         buttons = QHBoxLayout()
@@ -107,6 +108,7 @@ class MeasurementTable(QWidget):
     def _emit_change(self) -> None:
         next_project = self.project.clone()
         next_project.measurements = self._read_table()
+        log("INFO", "Measurement table edited", detail=f"rows={len(next_project.measurements)}")
         self.projectChanged.emit(next_project)
 
     def _item_changed(self, _item: QTableWidgetItem) -> None:
@@ -127,6 +129,7 @@ class MeasurementTable(QWidget):
                 ch2_range=next_project.settings.vforce_range_ch2,
             )
         )
+        log("OK", "Measurement row added", detail=f"rows={len(next_project.measurements)}")
         self.projectChanged.emit(next_project)
 
     def _remove_selected(self) -> None:
@@ -137,7 +140,9 @@ class MeasurementTable(QWidget):
         for row in selected:
             if 0 <= row < len(next_project.measurements):
                 next_project.measurements.pop(row)
+        log("OK", "Measurement row removed", detail=f"removed={len(selected)} rows={len(next_project.measurements)}")
         self.projectChanged.emit(next_project)
 
     def _copy_measurements(self) -> None:
         QApplication.clipboard().setText(wgfmu_exporter.measurement_text(self.project))
+        log("OK", "Measurement WGFMU text copied", detail=f"rows={len(self.project.measurements)}")

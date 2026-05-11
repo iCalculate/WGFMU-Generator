@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import os
 import sys
+import traceback
 from pathlib import Path
 
 import PySide6
 from PySide6.QtCore import QCoreApplication
 from PySide6.QtWidgets import QApplication
 
+from core.cli_log import color, log, print_banner
 from gui.main_window import MainWindow
 
 
@@ -55,20 +57,35 @@ def configure_qt_plugin_path() -> None:
                     os.add_dll_directory(str(Path(PySide6.__file__).resolve().parent))
                 except OSError:
                     pass
+            log("OK", "Qt plugin path configured", detail=str(plugins_dir))
             break
+    else:
+        log("WARN", "Qt plugin path was not found explicitly; using Qt defaults")
 
 
 def main() -> int:
     """Start the desktop application."""
 
+    print_banner()
+    log("INFO", "Starting WGFMU Designer")
     configure_qt_plugin_path()
+    log("INFO", "Creating Qt application")
     app = QApplication(sys.argv)
     app.setApplicationName("WGFMU Designer")
     app.setOrganizationName("WGFMU Designer")
+    log("INFO", "Building main window")
     window = MainWindow()
     window.show()
-    return app.exec()
+    log("OK", "GUI is ready")
+    exit_code = app.exec()
+    log("INFO", "Application exited", detail=f"exit_code={exit_code}")
+    return exit_code
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except Exception as exc:
+        log("ERROR", f"Startup failed: {exc}")
+        print(color(traceback.format_exc(), "red"))
+        raise

@@ -65,7 +65,10 @@ class Project:
 
     settings: ProjectSettings = field(default_factory=ProjectSettings)
     waveforms: dict[str, list[WaveformPoint]] = field(
-        default_factory=lambda: {"ch1": [], "ch2": []}
+        default_factory=lambda: {
+            "ch1": [WaveformPoint(0.0, 0.0), WaveformPoint(1e-3, 0.0)],
+            "ch2": [WaveformPoint(0.0, 0.0), WaveformPoint(1e-3, 0.0)],
+        }
     )
     measurements: list[MeasurementEvent] = field(default_factory=list)
 
@@ -198,16 +201,19 @@ def arrays_to_points(times: np.ndarray, voltages: np.ndarray) -> list[WaveformPo
 
 
 def make_monotonic_points(points: list[WaveformPoint], minimum_step: float = 1e-12) -> list[WaveformPoint]:
-    """Return points sorted by time with strictly increasing timestamps."""
+    """Return points sorted by time with a fixed (0, 0) start."""
 
     ordered = sorted(points, key=lambda point: point.time)
-    fixed: list[WaveformPoint] = []
-    last_time = -float("inf")
     step = minimum_step if minimum_step > 0 else 1e-12
+    fixed: list[WaveformPoint] = [WaveformPoint(0.0, 0.0)]
+    last_time = 0.0
     for point in ordered:
         time_value = max(0.0, float(point.time))
+        voltage = float(point.voltage)
+        if time_value == 0.0 and voltage == 0.0:
+            continue
         if time_value <= last_time:
             time_value = last_time + step
-        fixed.append(WaveformPoint(time_value, float(point.voltage)))
+        fixed.append(WaveformPoint(time_value, voltage))
         last_time = time_value
     return fixed

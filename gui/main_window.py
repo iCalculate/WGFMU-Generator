@@ -25,10 +25,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core.cli_log import log
 from core.models import Project
 from core.project_io import (
+    export_config_csv,
     export_measurements_csv,
     export_waveforms_csv,
+    import_config_csv,
     import_measurements_csv,
     load_project,
     save_project,
@@ -104,6 +107,7 @@ class MainWindow(QMainWindow):
             project.settings.minimum_point_spacing if project.settings.minimum_point_spacing > 0 else 1e-12
         )
         if push_undo:
+            log("INFO", text)
             self.undo_stack.push(ProjectCommand(self, self.project, project, text))
             return
         self.project = project.clone()
@@ -120,6 +124,8 @@ class MainWindow(QMainWindow):
         self.save_action = QAction("Save Project", self)
         self.export_action = QAction("Export WGFMU Text", self)
         self.export_csv_action = QAction("Export CSV", self)
+        self.import_config_csv_action = QAction("Import Config CSV", self)
+        self.export_config_csv_action = QAction("Export Config CSV", self)
         self.import_meas_action = QAction("Import Measurement CSV", self)
         self.export_meas_action = QAction("Export Measurement CSV", self)
 
@@ -131,6 +137,8 @@ class MainWindow(QMainWindow):
         self.save_action.triggered.connect(self._save_project)
         self.export_action.triggered.connect(self._export_text)
         self.export_csv_action.triggered.connect(self._export_csv)
+        self.import_config_csv_action.triggered.connect(self._import_config_csv)
+        self.export_config_csv_action.triggered.connect(self._export_config_csv)
         self.import_meas_action.triggered.connect(self._import_measurement_csv)
         self.export_meas_action.triggered.connect(self._export_measurement_csv)
 
@@ -141,6 +149,8 @@ class MainWindow(QMainWindow):
             self.open_action,
             self.save_action,
             self.export_action,
+            self.import_config_csv_action,
+            self.export_config_csv_action,
             self.export_csv_action,
         ]:
             file_menu.addAction(action)
@@ -192,6 +202,8 @@ class MainWindow(QMainWindow):
             self.open_action,
             self.save_action,
             self.export_action,
+            self.import_config_csv_action,
+            self.export_config_csv_action,
             self.export_csv_action,
         ]:
             button = QPushButton(action.text())
@@ -256,12 +268,14 @@ class MainWindow(QMainWindow):
         self.ch1_button.setChecked(channel == "ch1")
         self.ch2_button.setChecked(channel == "ch2")
         self.statusBar().showMessage(f"Editing {channel.upper()}", 2500)
+        log("INFO", "Active channel changed", detail=channel.upper())
 
     def _marker_mode_changed(self) -> None:
         mode = self.marker_mode_box.currentData()
         next_project = self.project.clone()
         next_project.settings.sample_marker_mode = mode
         self.editor.set_sample_marker_mode(mode)
+        log("INFO", "Sample point display changed", detail=str(mode))
         self.set_project(next_project, text="Change sample point display")
 
     def _display_mode_changed(self) -> None:
@@ -269,11 +283,13 @@ class MainWindow(QMainWindow):
         next_project = self.project.clone()
         next_project.settings.waveform_display_mode = mode
         self.editor.set_display_mode(mode)
+        log("INFO", "Waveform display changed", detail=str(mode))
         self.set_project(next_project, text="Change waveform display")
 
     def _show_points_changed(self) -> None:
         next_project = self.project.clone()
         next_project.settings.show_sample_points = self.show_points_check.isChecked()
+        log("INFO", "Sample points toggled", detail=f"visible={next_project.settings.show_sample_points}")
         self.set_project(next_project, text="Toggle sample points")
 
     def _build_settings_panel(self) -> QWidget:
@@ -342,6 +358,7 @@ class MainWindow(QMainWindow):
         next_project.settings.vforce_range_ch1 = self.range_ch1.value()
         next_project.settings.vforce_range_ch2 = self.range_ch2.value()
         next_project.settings.range_switch_guard_s = self.guard.value() * 1e-6
+        log("INFO", "Settings changed")
         self.set_project(next_project, text="Edit settings")
 
     def _sync_settings(self) -> None:
@@ -409,6 +426,7 @@ class MainWindow(QMainWindow):
         self.undo_stack.clear()
         self.set_project(Project(), push_undo=False)
         self.statusBar().showMessage("New project", 3000)
+        log("OK", "New project created")
 
     def _open_project(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Open Project", "", "WGFMU Project (*.json)")
@@ -419,7 +437,9 @@ class MainWindow(QMainWindow):
             self.undo_stack.clear()
             self.set_project(load_project(path), push_undo=False)
             self.statusBar().showMessage(f"Opened {path}", 5000)
+            log("OK", "Project opened", detail=path)
         except Exception as exc:  # pragma: no cover - GUI error path
+            log("ERROR", "Open project failed", detail=str(exc))
             QMessageBox.critical(self, "Open Failed", str(exc))
 
     def _save_project(self) -> None:
@@ -430,6 +450,7 @@ class MainWindow(QMainWindow):
             self.current_path = Path(path)
         save_project(self.current_path, self.project)
         self.statusBar().showMessage(f"Saved {self.current_path}", 5000)
+        log("OK", "Project saved", detail=str(self.current_path))
 
     def _export_text(self) -> None:
         ExportDialog(self.project, self).exec()
@@ -439,17 +460,38 @@ class MainWindow(QMainWindow):
         if path:
             export_waveforms_csv(path, self.project)
             self.statusBar().showMessage(f"Exported {path}", 5000)
+            log("OK", "Waveform CSV exported", detail=path)
+
+    def _import_config_csv(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Import Config CSV", "", "CSV Files (*.csv)")
+        if path:
+            try:
+                project = import_config_csv(path, self.project)
+                self.set_project(project, text="Import config CSV")
+                log("OK", "Config CSV imported", detail=path)
+            except Exception as exc:  # pragma: no cover - GUI error path
+                log("ERROR", "Config CSV import failed", detail=str(exc))
+                QMessageBox.critical(self, "Import Failed", str(exc))
+
+    def _export_config_csv(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(self, "Export Config CSV", "wgfmu_config.csv", "CSV Files (*.csv)")
+        if path:
+            export_config_csv(path, self.project)
+            self.statusBar().showMessage(f"Exported {path}", 5000)
+            log("OK", "Config CSV exported", detail=path)
 
     def _import_measurement_csv(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Import Measurement CSV", "", "CSV Files (*.csv)")
         if path:
             project = import_measurements_csv(path, self.project)
             self.set_project(project, text="Import measurement CSV")
+            log("OK", "Measurement CSV imported", detail=path)
 
     def _export_measurement_csv(self) -> None:
         path, _ = QFileDialog.getSaveFileName(self, "Export Measurement CSV", "measurements.csv", "CSV Files (*.csv)")
         if path:
             export_measurements_csv(path, self.project)
+            log("OK", "Measurement CSV exported", detail=path)
 
     def _update_cursor(self, time_value: float, voltage: float) -> None:
         self.statusBar().showMessage(f"Cursor: t={time_value:.6g} s, V={voltage:.6g} V")
@@ -460,6 +502,12 @@ class MainWindow(QMainWindow):
             QMainWindow, QWidget { background: #171b22; color: #d8dee9; }
             QDockWidget::title { background: #222833; padding: 5px; }
             QMenuBar, QMenu, QStatusBar { background: #1f2530; color: #d8dee9; }
+            QCheckBox::indicator {
+                width: 14px; height: 14px; border: 1px solid #64748b; background: #0f1720;
+            }
+            QCheckBox::indicator:checked {
+                background: #4ea1ff; border-color: #9dccff;
+            }
             QPushButton { background: #2a3240; border: 1px solid #3b4658; padding: 6px; border-radius: 4px; }
             QPushButton:hover { background: #344052; }
             QPushButton:checked { background: #355f92; border-color: #4ea1ff; }

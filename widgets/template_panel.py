@@ -15,7 +15,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core.models import CHANNELS, Project
+from core.cli_log import log
+from core.models import CHANNELS, Project, WaveformPoint
 from templates import generators
 from widgets.si_input import SIInput
 
@@ -145,12 +146,25 @@ class TemplatePanel(QWidget):
                 amplitude=amplitude, frequency=frequency, duty_cycle=duty, cycles=cycles
             ),
             "Read/Write Pulse": lambda: generators.read_write_pulse(write_voltage=amplitude, read_voltage=amplitude / 10.0),
-            "Custom": lambda: [],
+            "Custom": lambda: self._zero_baseline(width),
         }
         next_project = self.project.clone()
-        next_project.waveforms[self.channel] = list(mapping[name]())
+        generated_points = list(mapping[name]())
+        duration = max((point.time for point in generated_points), default=width)
+        other_channel = "ch2" if self.channel == "ch1" else "ch1"
+        next_project.waveforms[self.channel] = generated_points
+        next_project.waveforms[other_channel] = self._zero_baseline(duration)
         next_project.sort_waveforms()
+        log(
+            "OK",
+            "Waveform template applied",
+            detail=f"{name} -> {self.channel.upper()}, {other_channel.upper()} baseline duration={duration:.6g}s",
+        )
         self.projectChanged.emit(next_project)
+
+    def _zero_baseline(self, duration: float) -> list[WaveformPoint]:
+        duration = max(float(duration), self.project.settings.minimum_point_spacing)
+        return [WaveformPoint(0.0, 0.0), WaveformPoint(duration, 0.0)]
 
     def _update_field_visibility(self) -> None:
         name = self.template_box.currentText()

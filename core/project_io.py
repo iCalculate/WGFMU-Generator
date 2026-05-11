@@ -72,3 +72,78 @@ def import_measurements_csv(path: str | Path, project: Project) -> Project:
         for _, row in df.iterrows()
     ]
     return next_project
+
+
+def export_config_csv(path: str | Path, project: Project) -> None:
+    """Export CH1/CH2 waveforms and measurements to one CSV config file."""
+
+    columns = [
+        "Kind",
+        "Channel",
+        "Time [s]",
+        "Voltage [V]",
+        "tm [s]",
+        "Points",
+        "Interval [s]",
+        "Averaging [s]",
+        "Ch1 Range",
+        "Ch2 Range",
+    ]
+    rows = []
+    for channel in CHANNELS:
+        for point in project.waveforms[channel]:
+            rows.append(
+                {
+                    "Kind": "Waveform",
+                    "Channel": channel.upper(),
+                    "Time [s]": point.time,
+                    "Voltage [V]": point.voltage,
+                }
+            )
+    for event in project.measurements:
+        rows.append(
+            {
+                "Kind": "Measurement",
+                "tm [s]": event.tm,
+                "Points": event.points,
+                "Interval [s]": event.interval,
+                "Averaging [s]": event.averaging,
+                "Ch1 Range": event.ch1_range,
+                "Ch2 Range": event.ch2_range,
+            }
+        )
+    pd.DataFrame(rows, columns=columns).to_csv(path, index=False)
+
+
+def import_config_csv(path: str | Path, project: Project | None = None) -> Project:
+    """Import one CSV config file containing waveforms and measurements."""
+
+    df = pd.read_csv(path)
+    next_project = project.clone() if project is not None else Project()
+    kind = df["Kind"].astype(str).str.strip().str.lower()
+
+    waveforms = df[kind == "waveform"]
+    for channel in CHANNELS:
+        label = channel.upper()
+        sub = waveforms[waveforms["Channel"].astype(str).str.upper() == label]
+        next_project.waveforms[channel] = [
+            WaveformPoint(float(row["Time [s]"]), float(row["Voltage [V]"]))
+            for _, row in sub.iterrows()
+            if pd.notna(row["Time [s]"]) and pd.notna(row["Voltage [V]"])
+        ]
+
+    measurements = df[kind == "measurement"]
+    next_project.measurements = [
+        MeasurementEvent(
+            tm=float(row["tm [s]"]),
+            points=int(row["Points"]),
+            interval=float(row["Interval [s]"]),
+            averaging=float(row["Averaging [s]"]),
+            ch1_range=float(row["Ch1 Range"]),
+            ch2_range=float(row["Ch2 Range"]),
+        )
+        for _, row in measurements.iterrows()
+        if pd.notna(row["tm [s]"])
+    ]
+    next_project.enforce_monotonic_waveforms(next_project.settings.minimum_point_spacing)
+    return next_project
