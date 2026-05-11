@@ -59,12 +59,12 @@ def combined_text(project: Project) -> str:
 
 
 def with_paste_terminator(text: str) -> str:
-    """Return text with an extra trailing blank line for WGFMU paste."""
+    """Return text with one trailing line ending for clipboard/import use."""
 
     stripped = text.rstrip("\r\n")
     if not stripped:
-        return LINE_ENDING + LINE_ENDING
-    return stripped + LINE_ENDING + LINE_ENDING
+        return ""
+    return stripped + LINE_ENDING
 
 
 def save_text(path: str | Path, project: Project) -> None:

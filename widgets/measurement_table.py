@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QApplication,
+    QCheckBox,
     QHBoxLayout,
     QPushButton,
     QTableWidget,
@@ -13,14 +15,17 @@ from PySide6.QtWidgets import (
 )
 
 from core.models import MeasurementEvent, Project
+from core.si_units import format_si, parse_si
+from exporters import wgfmu_exporter
 
 
 class MeasurementTable(QWidget):
     """Editable table for WGFMU measurement event rows."""
 
     projectChanged = Signal(object)
+    overlayVisibilityChanged = Signal(bool)
 
-    HEADERS = ["tm [s]", "Points", "Interval [s]", "Averaging [s]", "Ch1 Range", "Ch2 Range"]
+    HEADERS = ["tm [s]", "Points", "Interval [s]", "Average [s]", "Ch1 Range", "Ch2 Range"]
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -34,12 +39,21 @@ class MeasurementTable(QWidget):
 
         self.add_button = QPushButton("Add Row")
         self.remove_button = QPushButton("Remove Selected")
+        self.copy_button = QPushButton("Copy WGFMU Text")
+        self.show_overlay_check = QCheckBox("Show in Plot")
+        self.show_overlay_check.setChecked(True)
         self.add_button.clicked.connect(self._add_row)
         self.remove_button.clicked.connect(self._remove_selected)
+        self.copy_button.clicked.connect(self._copy_measurements)
+        self.show_overlay_check.stateChanged.connect(
+            lambda state: self.overlayVisibilityChanged.emit(state == Qt.Checked)
+        )
 
         buttons = QHBoxLayout()
         buttons.addWidget(self.add_button)
         buttons.addWidget(self.remove_button)
+        buttons.addWidget(self.copy_button)
+        buttons.addWidget(self.show_overlay_check)
         buttons.addStretch(1)
 
         layout = QVBoxLayout(self)
@@ -54,9 +68,16 @@ class MeasurementTable(QWidget):
         self._updating = True
         self.table.setRowCount(len(project.measurements))
         for row, event in enumerate(project.measurements):
-            values = [event.tm, event.points, event.interval, event.averaging, event.ch1_range, event.ch2_range]
+            values = [
+                format_si(event.tm, unit=""),
+                str(event.points),
+                format_si(event.interval, unit=""),
+                format_si(event.averaging, unit=""),
+                f"{event.ch1_range:.12g}",
+                f"{event.ch2_range:.12g}",
+            ]
             for col, value in enumerate(values):
-                item = QTableWidgetItem(str(value))
+                item = QTableWidgetItem(value)
                 item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 self.table.setItem(row, col, item)
         self._updating = False
@@ -71,12 +92,12 @@ class MeasurementTable(QWidget):
             try:
                 rows.append(
                     MeasurementEvent(
-                        tm=float(text(0)),
+                        tm=parse_si(text(0)),
                         points=int(float(text(1, "1"))),
-                        interval=float(text(2)),
-                        averaging=float(text(3)),
-                        ch1_range=float(text(4)),
-                        ch2_range=float(text(5)),
+                        interval=parse_si(text(2, "1u")),
+                        averaging=parse_si(text(3, text(2, "1u"))),
+                        ch1_range=parse_si(text(4)),
+                        ch2_range=parse_si(text(5)),
                     )
                 )
             except ValueError:
@@ -94,7 +115,18 @@ class MeasurementTable(QWidget):
 
     def _add_row(self) -> None:
         next_project = self.project.clone()
-        next_project.measurements.append(MeasurementEvent())
+        interval = 1e-6
+        duration = max(next_project.duration(), interval)
+        next_project.measurements.append(
+            MeasurementEvent(
+                tm=0.0,
+                points=max(1, int(duration / interval) + 1),
+                interval=interval,
+                averaging=interval,
+                ch1_range=next_project.settings.vforce_range_ch1,
+                ch2_range=next_project.settings.vforce_range_ch2,
+            )
+        )
         self.projectChanged.emit(next_project)
 
     def _remove_selected(self) -> None:
@@ -106,3 +138,6 @@ class MeasurementTable(QWidget):
             if 0 <= row < len(next_project.measurements):
                 next_project.measurements.pop(row)
         self.projectChanged.emit(next_project)
+
+    def _copy_measurements(self) -> None:
+        QApplication.clipboard().setText(wgfmu_exporter.measurement_text(self.project))

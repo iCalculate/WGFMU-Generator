@@ -22,26 +22,64 @@ def _strict(points: list[WaveformPoint], epsilon: float = 1e-15) -> list[Wavefor
     return fixed
 
 
-def pulse(amplitude: float = 1.0, width: float = 1e-3, rise: float = 1e-6,
-          fall: float = 1e-6, delay: float = 0.0) -> list[WaveformPoint]:
+def pulse(
+    amplitude: float = 1.0,
+    hold: float = 1e-3,
+    rise: float = 1e-6,
+    fall: float = 1e-6,
+    delay: float = 0.0,
+    total: float | None = None,
+) -> list[WaveformPoint]:
     """Generate a single trapezoidal pulse."""
 
-    return _strict([
-        WaveformPoint(0.0, 0.0),
-        WaveformPoint(max(0.0, delay), 0.0),
-        WaveformPoint(max(0.0, delay + rise), amplitude),
-        WaveformPoint(max(0.0, delay + rise + width), amplitude),
-        WaveformPoint(max(0.0, delay + rise + width + fall), 0.0),
-    ])
+    start = max(0.0, delay)
+    rise = max(0.0, rise)
+    hold = max(0.0, hold)
+    fall = max(0.0, fall)
+    end = start + rise + hold + fall
+    total_time = max(end, total if total is not None else end)
+    points = [WaveformPoint(0.0, 0.0)]
+    if start > 0.0:
+        points.append(WaveformPoint(start, 0.0))
+    points.extend(
+        [
+            WaveformPoint(start + rise, amplitude),
+            WaveformPoint(start + rise + hold, amplitude),
+            WaveformPoint(end, 0.0),
+        ]
+    )
+    if total_time > end:
+        points.append(WaveformPoint(total_time, 0.0))
+    return _strict(points)
 
 
-def double_pulse(amplitude: float = 1.0, width: float = 1e-3, gap: float = 1e-3) -> list[WaveformPoint]:
-    """Generate two equal pulses separated by a gap."""
+def double_pulse(
+    amplitude1: float = 1.0,
+    hold1: float = 1e-3,
+    rise1: float = 1e-6,
+    fall1: float = 1e-6,
+    delay1: float = 0.0,
+    amplitude2: float = 1.0,
+    hold2: float = 1e-3,
+    rise2: float = 1e-6,
+    fall2: float = 1e-6,
+    delay2: float = 2e-3,
+    total: float | None = None,
+) -> list[WaveformPoint]:
+    """Generate two independently parameterized trapezoidal pulses."""
 
-    first = pulse(amplitude=amplitude, width=width, rise=1e-6, fall=1e-6, delay=0.0)
-    offset = width + gap + 2e-6
-    second = pulse(amplitude=amplitude, width=width, rise=1e-6, fall=1e-6, delay=offset)
-    return _strict(first + second)
+    first = pulse(amplitude=amplitude1, hold=hold1, rise=rise1, fall=fall1, delay=delay1)
+    second = [
+        point
+        for point in pulse(amplitude=amplitude2, hold=hold2, rise=rise2, fall=fall2, delay=delay2)
+        if point.time > 0.0
+    ]
+    end = max([point.time for point in first + second], default=0.0)
+    total_time = max(end, total if total is not None else end)
+    points = first + second
+    if total_time > end:
+        points.append(WaveformPoint(total_time, 0.0))
+    return _strict(points)
 
 
 def pulse_train(amplitude: float = 1.0, frequency: float = 1_000.0,

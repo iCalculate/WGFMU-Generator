@@ -32,7 +32,7 @@ class MeasurementEvent:
     tm: float = 0.0
     points: int = 1
     interval: float = 1e-6
-    averaging: float = 0.0
+    averaging: float = 1e-6
     ch1_range: float = 0.0
     ch2_range: float = 0.0
 
@@ -52,6 +52,7 @@ class ProjectSettings:
     smart_snap_enabled: bool = True
     sample_marker_mode: str = "adaptive"
     show_sample_points: bool = True
+    waveform_display_mode: str = "overlay"
     minimum_point_spacing: float = 100e-9
     vforce_range_ch1: float = 10.0
     vforce_range_ch2: float = 10.0

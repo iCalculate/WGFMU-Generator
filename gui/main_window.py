@@ -21,7 +21,6 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QDoubleSpinBox,
     QTabWidget,
-    QToolBar,
     QVBoxLayout,
     QWidget,
 )
@@ -41,6 +40,7 @@ from widgets.si_input import SIInput
 from widgets.template_panel import TemplatePanel
 from widgets.validation_panel import ValidationPanel
 from widgets.waveform_editor import WaveformEditor
+from widgets.waveform_point_table import WaveformPointTable
 
 
 class ProjectCommand(QUndoCommand):
@@ -78,6 +78,11 @@ class MainWindow(QMainWindow):
 
         self.measurement_table = MeasurementTable()
         self.measurement_table.projectChanged.connect(lambda project: self.set_project(project, text="Edit measurements"))
+        self.measurement_table.overlayVisibilityChanged.connect(self.editor.set_measurement_overlay_visible)
+
+        self.point_table = WaveformPointTable()
+        self.point_table.projectChanged.connect(lambda project: self.set_project(project, text="Edit waveform points"))
+        self.point_table.channelChanged.connect(self._set_active_channel)
 
         self.template_panel = TemplatePanel()
         self.template_panel.projectChanged.connect(lambda project: self.set_project(project, text="Apply template"))
@@ -104,6 +109,7 @@ class MainWindow(QMainWindow):
         self.project = project.clone()
         self.editor.set_project(self.project)
         self.measurement_table.set_project(self.project)
+        self.point_table.set_project(self.project)
         self.template_panel.set_project(self.project)
         self._sync_settings()
         self._refresh_validation()
@@ -136,8 +142,6 @@ class MainWindow(QMainWindow):
             self.save_action,
             self.export_action,
             self.export_csv_action,
-            self.import_meas_action,
-            self.export_meas_action,
         ]:
             file_menu.addAction(action)
 
@@ -149,18 +153,17 @@ class MainWindow(QMainWindow):
         edit_menu.addAction(self.undo_action)
         edit_menu.addAction(self.redo_action)
 
-        toolbar = QToolBar("Main")
-        toolbar.setMovable(False)
-        for action in [
-            self.new_action,
-            self.open_action,
-            self.save_action,
-            self.export_action,
-            self.undo_action,
-            self.redo_action,
-        ]:
-            toolbar.addAction(action)
-        self.addToolBar(toolbar)
+        view_menu = menubar.addMenu("View")
+        auto_y_action = QAction("Auto Y Range", self)
+        auto_xy_action = QAction("Auto XY Range", self)
+        auto_y_action.triggered.connect(self.editor.auto_y_range)
+        auto_xy_action.triggered.connect(self.editor.auto_xy_range)
+        view_menu.addAction(auto_y_action)
+        view_menu.addAction(auto_xy_action)
+
+        measurement_menu = menubar.addMenu("Measurement")
+        measurement_menu.addAction(self.import_meas_action)
+        measurement_menu.addAction(self.export_meas_action)
 
     def _build_docks(self) -> None:
         left = QDockWidget("Project", self)
@@ -176,6 +179,10 @@ class MainWindow(QMainWindow):
         bottom = QDockWidget("Measurement Events", self)
         bottom.setWidget(self.measurement_table)
         self.addDockWidget(Qt.BottomDockWidgetArea, bottom)
+
+        points = QDockWidget("Waveform Points", self)
+        points.setWidget(self.point_table)
+        self.addDockWidget(Qt.RightDockWidgetArea, points)
 
     def _build_project_controls(self) -> QWidget:
         widget = QWidget()
@@ -225,12 +232,17 @@ class MainWindow(QMainWindow):
         self.marker_mode_box.addItem("All points", "all")
         self.marker_mode_box.addItem("Hide points", "hidden")
         self.marker_mode_box.currentIndexChanged.connect(self._marker_mode_changed)
+        self.display_mode_box = QComboBox()
+        self.display_mode_box.addItem("Overlay channels", "overlay")
+        self.display_mode_box.addItem("Stack channels", "stacked")
+        self.display_mode_box.currentIndexChanged.connect(self._display_mode_changed)
         self.show_points_check = QCheckBox("Show sample points")
         self.show_points_check.setChecked(True)
         self.show_points_check.stateChanged.connect(self._show_points_changed)
         form = QFormLayout()
         form.addRow("", self.show_points_check)
         form.addRow("Sample Points", self.marker_mode_box)
+        form.addRow("Display", self.display_mode_box)
         layout.addLayout(form)
 
         layout.addStretch(1)
@@ -240,6 +252,7 @@ class MainWindow(QMainWindow):
         """Select which channel receives new graph points."""
 
         self.editor.set_active_channel(channel)
+        self.point_table.set_channel(channel)
         self.ch1_button.setChecked(channel == "ch1")
         self.ch2_button.setChecked(channel == "ch2")
         self.statusBar().showMessage(f"Editing {channel.upper()}", 2500)
@@ -250,6 +263,13 @@ class MainWindow(QMainWindow):
         next_project.settings.sample_marker_mode = mode
         self.editor.set_sample_marker_mode(mode)
         self.set_project(next_project, text="Change sample point display")
+
+    def _display_mode_changed(self) -> None:
+        mode = self.display_mode_box.currentData()
+        next_project = self.project.clone()
+        next_project.settings.waveform_display_mode = mode
+        self.editor.set_display_mode(mode)
+        self.set_project(next_project, text="Change waveform display")
 
     def _show_points_changed(self) -> None:
         next_project = self.project.clone()
@@ -263,24 +283,27 @@ class MainWindow(QMainWindow):
         self.viz_check = QCheckBox("Waveform timing visualization")
         self.snap_check = QCheckBox("Snap to grid")
         self.smart_snap_check = QCheckBox("Smart nice-number snap")
-        self.snap_time = self._double(0.0, 1e9, 1e-6, 1e-6, 12)
-        self.snap_voltage = self._double(0.0, 1e6, 0.01, 0.01, 6)
+        self.snap_time = self._double(0.0, 1e15, 1.0, 1.0, 6)
+        self.snap_voltage = self._double(0.0, 1e9, 10.0, 1.0, 6)
         self.minimum_spacing = SIInput(100e-9, 1e-15, 1e9, "s")
         self.range_ch1 = self._double(0.0, 1000.0, 10.0, 1.0, 6)
         self.range_ch2 = self._double(0.0, 1000.0, 10.0, 1.0, 6)
-        self.guard = self._double(0.0, 1e9, 1e-6, 1e-6, 12)
+        self.guard = self._double(0.0, 1e15, 1.0, 1.0, 6)
+        self.snap_time.setSuffix(" us")
+        self.snap_voltage.setSuffix(" mV")
+        self.guard.setSuffix(" us")
 
         form = QFormLayout(widget)
         form.addRow("RepeatCount", self.repeat_spin)
         form.addRow("", self.viz_check)
         form.addRow("", self.snap_check)
         form.addRow("", self.smart_snap_check)
-        form.addRow("Snap Time [s]", self.snap_time)
-        form.addRow("Snap Voltage [V]", self.snap_voltage)
+        form.addRow("Snap Time [us]", self.snap_time)
+        form.addRow("Snap Voltage [mV]", self.snap_voltage)
         form.addRow("Min Point Spacing [s]", self.minimum_spacing)
         form.addRow("Ch1 VForceRange [V]", self.range_ch1)
         form.addRow("Ch2 VForceRange [V]", self.range_ch2)
-        form.addRow("Switch Guard [s]", self.guard)
+        form.addRow("Switch Guard [us]", self.guard)
         for control in [
             self.repeat_spin,
             self.viz_check,
@@ -313,12 +336,12 @@ class MainWindow(QMainWindow):
         next_project.settings.waveform_timing_visualization = self.viz_check.isChecked()
         next_project.settings.snap_enabled = self.snap_check.isChecked()
         next_project.settings.smart_snap_enabled = self.smart_snap_check.isChecked()
-        next_project.settings.snap_time = self.snap_time.value()
-        next_project.settings.snap_voltage = self.snap_voltage.value()
+        next_project.settings.snap_time = self.snap_time.value() * 1e-6
+        next_project.settings.snap_voltage = self.snap_voltage.value() * 1e-3
         next_project.settings.minimum_point_spacing = self.minimum_spacing.value()
         next_project.settings.vforce_range_ch1 = self.range_ch1.value()
         next_project.settings.vforce_range_ch2 = self.range_ch2.value()
-        next_project.settings.range_switch_guard_s = self.guard.value()
+        next_project.settings.range_switch_guard_s = self.guard.value() * 1e-6
         self.set_project(next_project, text="Edit settings")
 
     def _sync_settings(self) -> None:
@@ -328,6 +351,7 @@ class MainWindow(QMainWindow):
             self.snap_check,
             self.smart_snap_check,
             self.marker_mode_box,
+            self.display_mode_box,
             self.show_points_check,
             self.snap_time,
             self.snap_voltage,
@@ -346,18 +370,22 @@ class MainWindow(QMainWindow):
         marker_index = self.marker_mode_box.findData(settings.sample_marker_mode)
         if marker_index >= 0:
             self.marker_mode_box.setCurrentIndex(marker_index)
-        self.snap_time.setValue(settings.snap_time)
-        self.snap_voltage.setValue(settings.snap_voltage)
+        display_index = self.display_mode_box.findData(settings.waveform_display_mode)
+        if display_index >= 0:
+            self.display_mode_box.setCurrentIndex(display_index)
+        self.snap_time.setValue(settings.snap_time * 1e6)
+        self.snap_voltage.setValue(settings.snap_voltage * 1e3)
         self.minimum_spacing.setValue(settings.minimum_point_spacing)
         self.range_ch1.setValue(settings.vforce_range_ch1)
         self.range_ch2.setValue(settings.vforce_range_ch2)
-        self.guard.setValue(settings.range_switch_guard_s)
+        self.guard.setValue(settings.range_switch_guard_s * 1e6)
         for control in [
             self.repeat_spin,
             self.viz_check,
             self.snap_check,
             self.smart_snap_check,
             self.marker_mode_box,
+            self.display_mode_box,
             self.show_points_check,
             self.snap_time,
             self.snap_voltage,
@@ -431,7 +459,7 @@ class MainWindow(QMainWindow):
             """
             QMainWindow, QWidget { background: #171b22; color: #d8dee9; }
             QDockWidget::title { background: #222833; padding: 5px; }
-            QMenuBar, QMenu, QToolBar, QStatusBar { background: #1f2530; color: #d8dee9; }
+            QMenuBar, QMenu, QStatusBar { background: #1f2530; color: #d8dee9; }
             QPushButton { background: #2a3240; border: 1px solid #3b4658; padding: 6px; border-radius: 4px; }
             QPushButton:hover { background: #344052; }
             QPushButton:checked { background: #355f92; border-color: #4ea1ff; }

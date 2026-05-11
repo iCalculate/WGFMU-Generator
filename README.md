@@ -5,9 +5,9 @@ WGFMU Designer is a desktop waveform and measurement-event editor for Keysight B
 ## Features
 
 - Dual-channel waveform editing for CH1 and CH2
-- Interactive `pyqtgraph` waveform display with zoom, pan, cursor readout, grid, draggable points, double-click add, and right-click delete/context actions
+- Interactive `pyqtgraph` waveform display with zoom, pan, cursor readout, grid, selectable points/segments, and modifier-based editing
 - Dragging a point previews continuously but creates one undo step only after mouse release
-- Left-side Editor panel controls for active edit channel, Auto Y, Auto XY, and sample point display
+- Left-side Editor panel controls for active edit channel, Auto Y, Auto XY, sample point display, and overlay/stacked channel display
 - On-plot minimum/median sample interval readout for each channel
 - Real-time graph coordinate readout while moving the cursor or dragging a point
 - Sample point display modes: adaptive points, all points, or hidden points
@@ -51,9 +51,9 @@ when snapping is enabled. Use simple values such as `1e-6` seconds and `0.01`
 volts to keep edited coordinates clean and integer-like. Setting `Snap Time` to
 `0` enables smart nice-number snapping based on the current view range.
 
-Click a waveform point to select it. Click near a waveform segment to insert a
-minimum-spacing sharp edge; clicking an already sharp near-overlapping segment
-flips its direction.
+Click a waveform point or segment to select it. Use `Ctrl+Click` to add a point
+to the active channel, `Alt+Click` near a point to delete it,
+and hold `Shift` while dragging to move points or selected segments.
 
 ## WGFMU Text Export
 

@@ -8,7 +8,7 @@ import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QMenu
+from PySide6.QtWidgets import QApplication, QMenu
 
 from core.models import CHANNELS, Project, WaveformPoint, points_to_arrays
 from core.si_units import format_si
@@ -32,6 +32,10 @@ class DraggablePoint(pg.ScatterPlotItem):
         if event.button() != Qt.LeftButton:
             event.ignore()
             return
+        if not (QApplication.keyboardModifiers() & Qt.ShiftModifier):
+            self._drag_index = None
+            event.ignore()
+            return
         spots = self.pointsAt(event.buttonDownPos())
         if event.isStart():
             self._drag_index = int(spots[0].data()) if len(spots) else None
@@ -47,16 +51,13 @@ class DraggablePoint(pg.ScatterPlotItem):
             self._drag_index = None
 
     def mouseClickEvent(self, event) -> None:  # noqa: N802 - pyqtgraph API
-        if event.button() == Qt.RightButton:
-            spots = self.pointsAt(event.pos())
-            if spots:
-                self.pointDeleted.emit(self.channel, int(spots[0].data()))
-                event.accept()
-                return
         if event.button() == Qt.LeftButton:
             spots = self.pointsAt(event.pos())
-            if spots:
-                self.pointSelected.emit(self.channel, int(spots[0].data()))
+            if len(spots):
+                if event.modifiers() & Qt.AltModifier:
+                    self.pointDeleted.emit(self.channel, int(spots[0].data()))
+                else:
+                    self.pointSelected.emit(self.channel, int(spots[0].data()))
                 event.accept()
                 return
         super().mouseClickEvent(event)
@@ -77,8 +78,16 @@ class WaveformEditor(pg.PlotWidget):
         self.active_channel = "ch1"
         self._drag_project: Project | None = None
         self._drag_changed = False
+        self._point_drag: tuple[str, int, float, float, str | None] | None = None
         self.selected_point: tuple[str, int] | None = None
+        self.selected_segment: tuple[str, int, int] | None = None
+        self._segment_drag: tuple[str, int, int, float, float, float, float, str | None] | None = None
+        self._segment_drag_changed = False
         self.sample_marker_mode = "adaptive"
+        self.display_mode = "overlay"
+        self._display_offsets = {"ch1": 0.0, "ch2": 0.0}
+        self.show_measurements = True
+        self._last_cursor_view: tuple[float, float] | None = None
         self.showGrid(x=True, y=True, alpha=0.28)
         self.setBackground("#11151c")
         self.setLabel("bottom", "Time", units="s")
@@ -111,12 +120,20 @@ class WaveformEditor(pg.PlotWidget):
         self.addItem(self.selected_marker, ignoreBounds=True)
 
         self.measurement_items: list[pg.InfiniteLine] = []
+        self.measurement_sample_item = pg.ScatterPlotItem(
+            size=6,
+            pen=pg.mkPen("#44f07a", width=1),
+            brush=pg.mkBrush("#44f07a"),
+        )
+        self.addItem(self.measurement_sample_item, ignoreBounds=True)
         self.cursor_line = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("#cfd8dc", width=1, style=Qt.DashLine))
-        self.addItem(self.cursor_line)
-        self.sample_info = pg.TextItem(color="#cfd8dc", anchor=(0, 0))
-        self.addItem(self.sample_info, ignoreBounds=True)
+        self.addItem(self.cursor_line, ignoreBounds=True)
+        self.cursor_hline = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen("#cfd8dc", width=1, style=Qt.DashLine))
+        self.addItem(self.cursor_hline, ignoreBounds=True)
         self.cursor_info = pg.TextItem(color="#9fb2c3", anchor=(1, 0))
         self.addItem(self.cursor_info, ignoreBounds=True)
+        self.segment_marker = pg.PlotDataItem([], [], pen=pg.mkPen("#ffd166", width=5))
+        self.addItem(self.segment_marker, ignoreBounds=True)
         self.drag_info = pg.TextItem(color="#ffffff", fill=pg.mkBrush(20, 25, 33, 210), anchor=(0, 1))
         self.drag_info.hide()
         self.addItem(self.drag_info, ignoreBounds=True)
@@ -128,6 +145,7 @@ class WaveformEditor(pg.PlotWidget):
 
         self.project = project
         self.sample_marker_mode = project.settings.sample_marker_mode
+        self.display_mode = project.settings.waveform_display_mode
         self.refresh()
 
     def set_active_channel(self, channel: str) -> None:
@@ -142,17 +160,55 @@ class WaveformEditor(pg.PlotWidget):
         self.sample_marker_mode = mode
         self.refresh()
 
+    def set_display_mode(self, mode: str) -> None:
+        """Set channel display mode: overlay or stacked."""
+
+        self.display_mode = mode if mode == "stacked" else "overlay"
+        self.refresh()
+
     def refresh(self) -> None:
         """Redraw curves, handles and measurement overlays."""
 
+        self._update_display_offsets()
         for channel in CHANNELS:
             x, y = points_to_arrays(self.project.waveforms[channel])
-            self.curves[channel].setData(x, y)
+            self.curves[channel].setData(x, self._to_display_y(channel, y))
             marker_x, marker_y, marker_indexes = self._marker_data(channel, x, y)
-            self.points[channel].setData(x=marker_x, y=marker_y, data=marker_indexes)
+            self.points[channel].setData(
+                x=marker_x,
+                y=self._to_display_y(channel, marker_y),
+                data=marker_indexes,
+            )
         self._draw_measurement_overlays()
         self._update_selected_marker()
-        self._update_sample_info()
+        self._update_selected_segment_marker()
+
+    def _update_display_offsets(self) -> None:
+        if self.display_mode != "stacked":
+            self._display_offsets = {"ch1": 0.0, "ch2": 0.0}
+            self.setLabel("left", "Voltage", units="V")
+            return
+        voltages = [
+            point.voltage
+            for channel in CHANNELS
+            for point in self.project.waveforms[channel]
+        ]
+        span = max(voltages) - min(voltages) if voltages else 1.0
+        separation = max(span * 1.35, 1.0)
+        self._display_offsets = {"ch1": separation / 2.0, "ch2": -separation / 2.0}
+        self.setLabel("left", "Stacked channel voltage", units="V")
+
+    def _to_display_y(self, channel: str, voltage):
+        return voltage + self._display_offsets.get(channel, 0.0)
+
+    def _from_display_y(self, channel: str, display_voltage: float) -> float:
+        return display_voltage - self._display_offsets.get(channel, 0.0)
+
+    def set_measurement_overlay_visible(self, visible: bool) -> None:
+        """Show or hide measurement timing markers on the plot."""
+
+        self.show_measurements = visible
+        self._draw_measurement_overlays()
 
     def _marker_data(self, channel: str, x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray, list[int]]:
         """Return marker data for the configured sample display mode."""
@@ -209,25 +265,91 @@ class WaveformEditor(pg.PlotWidget):
             self.auto_xy_range()
 
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802 - Qt API
-        if event.button() == Qt.LeftButton:
-            scene_point = self.mapToScene(event.position().toPoint())
-            point = self.getPlotItem().vb.mapSceneToView(scene_point)
-            if event.modifiers() & Qt.ShiftModifier:
-                self._insert_sharp_edge(self.active_channel, float(point.x()), rising=True)
-            else:
-                self._add_point(self.active_channel, float(point.x()), float(point.y()))
-            event.accept()
-            return
         super().mouseDoubleClickEvent(event)
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt API
-        if event.button() == Qt.LeftButton and not (event.modifiers() & Qt.ShiftModifier):
+        if event.button() == Qt.LeftButton:
             scene_point = self.mapToScene(event.position().toPoint())
             view_point = self.getPlotItem().vb.mapSceneToView(scene_point)
-            if self._handle_segment_click(float(view_point.x()), float(view_point.y())):
+            time_value = float(view_point.x())
+            display_voltage = float(view_point.y())
+            voltage = self._from_display_y(self.active_channel, display_voltage)
+            if event.modifiers() & Qt.ControlModifier:
+                cursor_time, cursor_voltage = self._last_cursor_view or (time_value, display_voltage)
+                self._add_point(
+                    self.active_channel,
+                    cursor_time,
+                    self._from_display_y(self.active_channel, cursor_voltage),
+                )
+                event.accept()
+                return
+            if event.modifiers() & Qt.AltModifier:
+                index = self._nearest_point_index_near(self.active_channel, time_value, display_voltage)
+                if index is not None:
+                    self._delete_point(self.active_channel, index)
+                    event.accept()
+                    return
+            if event.modifiers() & Qt.ShiftModifier:
+                if self._nearest_point_index_near(self.active_channel, time_value, display_voltage) is not None:
+                    super().mousePressEvent(event)
+                    return
+                if self._begin_segment_drag_or_select(self.active_channel, time_value, display_voltage):
+                    event.accept()
+                    return
+            if self._select_nearest_point_near(self.active_channel, time_value, display_voltage):
+                event.accept()
+                return
+            if self._select_nearest_segment_near(self.active_channel, time_value, display_voltage):
                 event.accept()
                 return
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt API
+        if self._segment_drag is not None:
+            channel, left_index, right_index, start_x, start_y, left_v, right_v, axis = self._segment_drag
+            scene_point = self.mapToScene(event.position().toPoint())
+            view_point = self.getPlotItem().vb.mapSceneToView(scene_point)
+            raw_dx = float(view_point.x()) - start_x
+            raw_dy = float(view_point.y()) - start_y
+            if axis is None:
+                axis = "x" if abs(raw_dx) >= abs(raw_dy) else "y"
+                self._segment_drag = (channel, left_index, right_index, start_x, start_y, left_v, right_v, axis)
+            delta_t = raw_dx if axis == "x" else 0.0
+            delta_v = raw_dy if axis == "y" else 0.0
+            next_project = self.project.clone()
+            points = next_project.waveforms[channel]
+            if right_index < len(points):
+                left_t, left_v_next = self._snap(points[left_index].time + delta_t, left_v + delta_v)
+                right_t, right_v_next = self._snap(points[right_index].time + delta_t, right_v + delta_v)
+                if axis == "x":
+                    left_v_next = left_v
+                    right_v_next = right_v
+                else:
+                    left_t = points[left_index].time
+                    right_t = points[right_index].time
+                points[left_index] = WaveformPoint(left_t, left_v_next)
+                points[right_index] = WaveformPoint(right_t, right_v_next)
+                self.project = next_project
+                self.selected_segment = (channel, left_index, right_index)
+                self._segment_drag_changed = True
+                self.refresh()
+                self._show_drag_info(channel, points[left_index].time, points[left_index].voltage)
+                self.cursorChanged.emit(float(view_point.x()), self._from_display_y(channel, float(view_point.y())))
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt API
+        if self._segment_drag is not None:
+            changed = self._segment_drag_changed
+            self._segment_drag = None
+            self._segment_drag_changed = False
+            self.drag_info.hide()
+            if changed:
+                self.projectChanged.emit(self.project.clone())
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
     def _snap(self, time_value: float, voltage: float) -> tuple[float, float]:
         settings = self.project.settings
@@ -279,7 +401,7 @@ class WaveformEditor(pg.PlotWidget):
         """Fit the Y axis to visible waveform voltages."""
 
         voltages = [
-            point.voltage
+            self._to_display_y(channel, point.voltage)
             for channel in CHANNELS
             for point in self.project.waveforms[channel]
         ]
@@ -298,13 +420,28 @@ class WaveformEditor(pg.PlotWidget):
     def _begin_drag_point(self, _channel: str, _index: int) -> None:
         self._drag_project = self.project.clone()
         self._drag_changed = False
+        if 0 <= _index < len(self.project.waveforms[_channel]):
+            point = self.project.waveforms[_channel][_index]
+            self._point_drag = (_channel, _index, point.time, point.voltage, None)
+        else:
+            self._point_drag = None
 
     def _preview_drag_point(self, channel: str, index: int, time_value: float, voltage: float) -> None:
+        voltage = self._from_display_y(channel, voltage)
         if self._drag_project is None:
             self._drag_project = self.project.clone()
         next_project = self._drag_project.clone()
         if index >= len(next_project.waveforms[channel]):
             return
+        if self._point_drag is not None:
+            _drag_channel, _drag_index, start_t, start_v, axis = self._point_drag
+            if axis is None:
+                axis = "x" if abs(time_value - start_t) >= abs(voltage - start_v) else "y"
+                self._point_drag = (channel, index, start_t, start_v, axis)
+            if axis == "x":
+                voltage = start_v
+            else:
+                time_value = start_t
         time_value, voltage = self._snap(time_value, voltage)
         next_project.waveforms[channel][index] = WaveformPoint(time_value, voltage)
         # Do not sort during drag; stable point identity makes editing feel much
@@ -318,11 +455,13 @@ class WaveformEditor(pg.PlotWidget):
     def _finish_drag_point(self) -> None:
         if not self._drag_changed:
             self._drag_project = None
+            self._point_drag = None
             return
         next_project = self.project.clone()
         next_project.enforce_monotonic_waveforms(self._minimum_time_step())
         self._drag_project = None
         self._drag_changed = False
+        self._point_drag = None
         self.drag_info.hide()
         self.projectChanged.emit(next_project)
 
@@ -353,7 +492,9 @@ class WaveformEditor(pg.PlotWidget):
     def _select_point(self, channel: str, index: int) -> None:
         if 0 <= index < len(self.project.waveforms[channel]):
             self.selected_point = (channel, index)
+            self.selected_segment = None
             self._update_selected_marker()
+            self._update_selected_segment_marker()
             point = self.project.waveforms[channel][index]
             self._show_drag_info(channel, point.time, point.voltage)
 
@@ -363,6 +504,64 @@ class WaveformEditor(pg.PlotWidget):
             return
         index = min(range(len(points)), key=lambda i: abs(points[i].time - time_value))
         self._select_point(channel, index)
+
+    def _select_nearest_point_near(self, channel: str, time_value: float, voltage: float) -> bool:
+        index = self._nearest_point_index_near(channel, time_value, voltage)
+        if index is None:
+            return False
+        self._select_point(channel, index)
+        return True
+
+    def _nearest_point_index_near(self, channel: str, time_value: float, voltage: float) -> int | None:
+        points = self.project.waveforms[channel]
+        if not points:
+            return None
+        view_box = self.getPlotItem().vb
+        click_scene = view_box.mapViewToScene(pg.Point(time_value, voltage))
+        best: tuple[float, int] | None = None
+        for index, point in enumerate(points):
+            point_scene = view_box.mapViewToScene(pg.Point(point.time, self._to_display_y(channel, point.voltage)))
+            distance = float(np.hypot(click_scene.x() - point_scene.x(), click_scene.y() - point_scene.y()))
+            if best is None or distance < best[0]:
+                best = (distance, index)
+        if best is None or best[0] > 16.0:
+            return None
+        return best[1]
+
+    def _select_nearest_segment_near(self, channel: str, time_value: float, voltage: float) -> bool:
+        segment = self._nearest_segment(channel, time_value, voltage)
+        if segment is None:
+            return False
+        self.selected_point = None
+        self.selected_segment = segment
+        self._update_selected_marker()
+        self._update_selected_segment_marker()
+        return True
+
+    def _begin_segment_drag_or_select(self, channel: str, time_value: float, voltage: float) -> bool:
+        segment = self._nearest_segment(channel, time_value, voltage)
+        if segment is None:
+            return False
+        channel, left_index, right_index = segment
+        points = self.project.waveforms[channel]
+        if right_index >= len(points):
+            return False
+        self.selected_point = None
+        self.selected_segment = (channel, left_index, right_index)
+        self._update_selected_marker()
+        self._update_selected_segment_marker()
+        self._segment_drag = (
+            channel,
+            left_index,
+            right_index,
+            time_value,
+            voltage,
+            points[left_index].voltage,
+            points[right_index].voltage,
+            None,
+        )
+        self._segment_drag_changed = False
+        return True
 
     def _update_selected_marker(self) -> None:
         if self.selected_point is None:
@@ -375,7 +574,24 @@ class WaveformEditor(pg.PlotWidget):
             self.selected_marker.setData([], [])
             return
         point = points[index]
-        self.selected_marker.setData([point.time], [point.voltage])
+        self.selected_marker.setData([point.time], [self._to_display_y(channel, point.voltage)])
+
+    def _update_selected_segment_marker(self) -> None:
+        if self.selected_segment is None:
+            self.segment_marker.setData([], [])
+            return
+        channel, left_index, right_index = self.selected_segment
+        points = self.project.waveforms[channel]
+        if right_index >= len(points):
+            self.selected_segment = None
+            self.segment_marker.setData([], [])
+            return
+        left = points[left_index]
+        right = points[right_index]
+        self.segment_marker.setData(
+            [left.time, right.time],
+            [self._to_display_y(channel, left.voltage), self._to_display_y(channel, right.voltage)],
+        )
 
     def _delete_point(self, channel: str, index: int) -> None:
         next_project = self.project.clone()
@@ -383,6 +599,7 @@ class WaveformEditor(pg.PlotWidget):
             next_project.waveforms[channel].pop(index)
             if self.selected_point == (channel, index):
                 self.selected_point = None
+            self.selected_segment = None
             self.projectChanged.emit(next_project)
 
     def _delete_nearest(self, channel: str, time_value: float) -> None:
@@ -429,7 +646,8 @@ class WaveformEditor(pg.PlotWidget):
             self.selected_point = (channel, right_index)
             self.projectChanged.emit(next_project)
             return True
-        rising = voltage >= (left.voltage + right.voltage) / 2.0
+        actual_voltage = self._from_display_y(channel, voltage)
+        rising = actual_voltage >= (left.voltage + right.voltage) / 2.0
         self._insert_sharp_edge(channel, time_value, rising=rising)
         return True
 
@@ -443,14 +661,20 @@ class WaveformEditor(pg.PlotWidget):
         for index in range(len(points) - 1):
             left = points[index]
             right = points[index + 1]
-            if not (min(left.time, right.time) <= time_value <= max(left.time, right.time)):
+            left_scene = view_box.mapViewToScene(pg.Point(left.time, self._to_display_y(channel, left.voltage)))
+            right_scene = view_box.mapViewToScene(pg.Point(right.time, self._to_display_y(channel, right.voltage)))
+            x_margin = max(abs(right_scene.x() - left_scene.x()), 14.0)
+            click_x = click_scene.x()
+            if not (
+                min(left_scene.x(), right_scene.x()) - x_margin
+                <= click_x
+                <= max(left_scene.x(), right_scene.x()) + x_margin
+            ):
                 continue
-            left_scene = view_box.mapViewToScene(pg.Point(left.time, left.voltage))
-            right_scene = view_box.mapViewToScene(pg.Point(right.time, right.voltage))
             distance = self._point_to_segment_distance_px(click_scene, left_scene, right_scene)
             if best is None or distance < best[0]:
                 best = (distance, index, index + 1)
-        if best is None or best[0] > 10.0:
+        if best is None or best[0] > 16.0:
             return None
         return channel, best[1], best[2]
 
@@ -482,6 +706,9 @@ class WaveformEditor(pg.PlotWidget):
         for item in self.measurement_items:
             self.removeItem(item)
         self.measurement_items = []
+        if not self.show_measurements:
+            self.measurement_sample_item.setData([], [])
+            return
         for event in self.project.measurements:
             line = pg.InfiniteLine(
                 pos=event.tm,
@@ -489,37 +716,38 @@ class WaveformEditor(pg.PlotWidget):
                 movable=False,
                 pen=pg.mkPen("#ffd166", width=1.2, style=Qt.DotLine),
             )
-            self.addItem(line)
+            self.addItem(line, ignoreBounds=True)
             self.measurement_items.append(line)
+        sample_x, sample_y = self._measurement_sample_points()
+        self.measurement_sample_item.setData(sample_x, sample_y)
 
-    def _update_sample_info(self) -> None:
-        lines = []
+    def _measurement_sample_points(self) -> tuple[list[float], list[float]]:
+        sample_x: list[float] = []
+        sample_y: list[float] = []
         for channel in CHANNELS:
             points = self.project.waveforms[channel]
             if len(points) < 2:
-                lines.append(f"{channel.upper()}: dt --")
                 continue
             times = np.array([point.time for point in points], dtype=float)
-            diffs = np.diff(np.sort(times))
-            positive = diffs[diffs > 0]
-            if len(positive) == 0:
-                lines.append(f"{channel.upper()}: dt duplicate")
-                continue
-            lines.append(
-                f"{channel.upper()}: min dt {format_si(float(np.min(positive)), 's')}, "
-                f"med dt {format_si(float(np.median(positive)), 's')}"
-            )
-        self.sample_info.setText("\n".join(lines))
-        self._position_overlay_text()
+            voltages = np.array([point.voltage for point in points], dtype=float)
+            for event in self.project.measurements:
+                count = max(0, int(event.points))
+                if count == 0:
+                    continue
+                measurement_times = event.tm + np.arange(count, dtype=float) * max(event.interval, 0.0)
+                in_range = measurement_times[(measurement_times >= times[0]) & (measurement_times <= times[-1])]
+                if len(in_range) == 0:
+                    continue
+                sample_x.extend(float(value) for value in in_range)
+                sample_y.extend(
+                    float(value) for value in self._to_display_y(channel, np.interp(in_range, times, voltages))
+                )
+        return sample_x, sample_y
 
     def _position_overlay_text(self) -> None:
         view_range = self.getViewBox().viewRange()
         x_min, x_max = view_range[0]
         y_min, y_max = view_range[1]
-        self.sample_info.setPos(
-            x_min + (x_max - x_min) * 0.015,
-            y_max - (y_max - y_min) * 0.04,
-        )
         self.cursor_info.setPos(
             x_max - (x_max - x_min) * 0.015,
             y_max - (y_max - y_min) * 0.04,
@@ -529,20 +757,23 @@ class WaveformEditor(pg.PlotWidget):
         self.drag_info.setText(
             f"{channel.upper()}  t={format_si(time_value, 's')}  V={voltage:.6g}"
         )
-        self.drag_info.setPos(time_value, voltage)
+        self.drag_info.setPos(time_value, self._to_display_y(channel, voltage))
         self.drag_info.show()
 
     def _mouse_moved(self, scene_pos) -> None:
         if self.sceneBoundingRect().contains(scene_pos):
             point = self.getPlotItem().vb.mapSceneToView(scene_pos)
+            self._last_cursor_view = (float(point.x()), float(point.y()))
+            active_voltage = self._from_display_y(self.active_channel, float(point.y()))
             self.cursor_line.setValue(point.x())
+            self.cursor_hline.setValue(point.y())
             snap_text = ""
             if self.project.settings.snap_enabled:
                 snap_text = (
-                    f"\nSnap: {format_si(self._active_snap_time(), 's')}, "
-                    f"{self._active_snap_voltage():.6g} V"
+                    f"\nSnap: {self._active_snap_time() * 1e6:.6g} us, "
+                    f"{self._active_snap_voltage() * 1e3:.6g} mV"
                 )
             self.cursor_info.setText(
-                f"t={format_si(float(point.x()), 's')}\nV={float(point.y()):.6g}{snap_text}"
+                f"t={format_si(float(point.x()), 's')}\n{self.active_channel.upper()} V={active_voltage:.6g}{snap_text}"
             )
-            self.cursorChanged.emit(float(point.x()), float(point.y()))
+            self.cursorChanged.emit(float(point.x()), active_voltage)
