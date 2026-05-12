@@ -14,6 +14,12 @@ import numpy as np
 
 
 CHANNELS = ("ch1", "ch2")
+FORCE_RANGE_OPTIONS = {
+    "pm3": ("+/-3 V", -3.0, 3.0),
+    "pm5": ("+/-5 V", -5.0, 5.0),
+    "0_10": ("0 to 10 V", 0.0, 10.0),
+    "neg10_0": ("-10 to 0 V", -10.0, 0.0),
+}
 
 
 @dataclass
@@ -55,7 +61,10 @@ class ProjectSettings:
     minimum_point_spacing: float = 100e-9
     vforce_range_ch1: float = 10.0
     vforce_range_ch2: float = 10.0
+    force_range_mode_ch1: str = "pm5"
+    force_range_mode_ch2: str = "pm5"
     range_switch_guard_s: float = 1e-6
+    measurement_sampling_interval: float = 1e-6
 
 
 @dataclass
@@ -93,6 +102,16 @@ class Project:
         step = minimum_step if minimum_step and minimum_step > 0 else self.settings.minimum_point_spacing
         for channel in CHANNELS:
             self.waveforms[channel] = make_monotonic_points(self.waveforms[channel], step)
+
+    def enforce_force_ranges(self) -> None:
+        """Clamp waveform voltages to the selected per-channel force ranges."""
+
+        for channel in CHANNELS:
+            low, high = force_range_limits(self.settings, channel)
+            self.waveforms[channel] = [
+                WaveformPoint(point.time, min(high, max(low, point.voltage)))
+                for point in self.waveforms[channel]
+            ]
 
     def duration(self) -> float:
         """Return the largest waveform time across channels."""
@@ -153,6 +172,17 @@ class Project:
         project = cls(settings=settings, waveforms=waveforms, measurements=measurements)
         project.sort_waveforms()
         return project
+
+
+def force_range_limits(settings: ProjectSettings, channel: str) -> tuple[float, float]:
+    """Return the selected voltage force range limits for one channel."""
+
+    key = settings.force_range_mode_ch1 if channel == "ch1" else settings.force_range_mode_ch2
+    if key in FORCE_RANGE_OPTIONS:
+        _label, low, high = FORCE_RANGE_OPTIONS[key]
+        return low, high
+    fallback = abs(settings.vforce_range_ch1 if channel == "ch1" else settings.vforce_range_ch2)
+    return -fallback, fallback
 
 
 def points_to_arrays(points: list[WaveformPoint]) -> tuple[np.ndarray, np.ndarray]:

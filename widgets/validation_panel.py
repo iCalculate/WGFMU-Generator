@@ -17,6 +17,7 @@ class ValidationPanel(QWidget):
         self.list_widget = QListWidget()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
         layout.addWidget(self.counter)
         layout.addWidget(self.list_widget)
 

@@ -11,6 +11,7 @@ import PySide6
 from PySide6.QtCore import QCoreApplication
 from PySide6.QtWidgets import QApplication
 
+from core.app_info import APP_NAME, APP_VERSION
 from core.cli_log import color, log, print_banner
 from gui.main_window import MainWindow
 
@@ -79,8 +80,9 @@ def main() -> int:
     configure_qt_plugin_path()
     log("INFO", "Creating Qt application")
     app = QApplication(sys.argv)
-    app.setApplicationName("WGFMU Designer")
-    app.setOrganizationName("WGFMU Designer")
+    app.setApplicationName(APP_NAME)
+    app.setApplicationVersion(APP_VERSION)
+    app.setOrganizationName(APP_NAME)
     icon_path = resource_path("assets/app_icon.ico")
     if icon_path.exists():
         from PySide6.QtGui import QIcon

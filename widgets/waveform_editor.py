@@ -11,7 +11,7 @@ from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QApplication, QMenu
 
 from core.cli_log import log
-from core.models import CHANNELS, Project, WaveformPoint, points_to_arrays
+from core.models import CHANNELS, MeasurementEvent, Project, WaveformPoint, force_range_limits, points_to_arrays
 from core.si_units import format_si
 
 
@@ -84,6 +84,9 @@ class WaveformEditor(pg.PlotWidget):
         self.selected_segment: tuple[str, int, int] | None = None
         self._segment_drag: tuple[str, int, int, float, float, float, float, float, float, str | None, str] | None = None
         self._segment_drag_changed = False
+        self._measurement_drag: tuple[float, str] | None = None
+        self._measurement_drag_moved = False
+        self._suppress_context_menu = False
         self._channel_visible = {"ch1": True, "ch2": True}
         self.sample_marker_mode = "adaptive"
         self.display_mode = "overlay"
@@ -107,6 +110,13 @@ class WaveformEditor(pg.PlotWidget):
             "ch2": pg.PlotDataItem([], [], pen=pg.mkPen(self.COLORS["ch2"], width=2.2, style=Qt.DashLine)),
         }
         for item in self.sharp_curves.values():
+            self.addItem(item)
+        self.repeat_curves = {
+            "ch1": pg.PlotDataItem([], [], pen=pg.mkPen(self.COLORS["ch1"], width=2.2, alpha=70)),
+            "ch2": pg.PlotDataItem([], [], pen=pg.mkPen(self.COLORS["ch2"], width=2.2, alpha=70)),
+        }
+        for item in self.repeat_curves.values():
+            item.setZValue(-10)
             self.addItem(item)
         self.points = {
             channel: DraggablePoint(channel, color)
@@ -134,6 +144,17 @@ class WaveformEditor(pg.PlotWidget):
             brush=pg.mkBrush("#44f07a"),
         )
         self.addItem(self.measurement_sample_item, ignoreBounds=True)
+        self.measurement_preview_region = pg.LinearRegionItem(
+            values=[0.0, 0.0],
+            orientation="vertical",
+            movable=False,
+            brush=pg.mkBrush(255, 209, 102, 70),
+            pen=pg.mkPen("#ffd166", width=1.2, style=Qt.DashLine),
+        )
+        self.measurement_preview_region.setZValue(-20)
+        self.measurement_preview_region.setAcceptedMouseButtons(Qt.NoButton)
+        self.measurement_preview_region.hide()
+        self.addItem(self.measurement_preview_region, ignoreBounds=True)
         self.cursor_line = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("#cfd8dc", width=1, style=Qt.DashLine))
         self.addItem(self.cursor_line, ignoreBounds=True)
         self.cursor_hline = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen("#cfd8dc", width=1, style=Qt.DashLine))
@@ -187,6 +208,9 @@ class WaveformEditor(pg.PlotWidget):
             self.curves[channel].setVisible(visible)
             self.sharp_curves[channel].setData(sharp_x, sharp_y)
             self.sharp_curves[channel].setVisible(visible)
+            repeat_x, repeat_y = self._repeat_curve_data(channel, curve_x, curve_y)
+            self.repeat_curves[channel].setData(repeat_x, repeat_y)
+            self.repeat_curves[channel].setVisible(visible)
             marker_x, marker_y, marker_indexes = self._marker_data(channel, x, y)
             self.points[channel].setData(
                 x=marker_x,
@@ -225,6 +249,24 @@ class WaveformEditor(pg.PlotWidget):
             np.array(sharp_x, dtype=float),
             np.array(sharp_y, dtype=float),
         )
+
+    def _repeat_curve_data(self, _channel: str, x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        repeat_count = int(self.project.settings.repeat_count)
+        period = self._first_cycle_duration()
+        if repeat_count <= 1 or period <= 0 or len(x) == 0:
+            return np.array([], dtype=float), np.array([], dtype=float)
+        repeats = range(1, repeat_count)
+        max_drawn_repeats = max(1, 200_000 // max(1, len(x)))
+        if repeat_count - 1 > max_drawn_repeats:
+            repeats = list(range(1, max_drawn_repeats)) + [repeat_count - 1]
+        repeat_x: list[float] = []
+        repeat_y: list[float] = []
+        for index in repeats:
+            repeat_x.extend((x + period * index).tolist())
+            repeat_y.extend(y.tolist())
+            repeat_x.append(np.nan)
+            repeat_y.append(np.nan)
+        return np.array(repeat_x, dtype=float), np.array(repeat_y, dtype=float)
 
     def _make_legend_toggleable(self) -> None:
         legend = self.getPlotItem().legend
@@ -302,8 +344,15 @@ class WaveformEditor(pg.PlotWidget):
         return x[indexes], y[indexes], indexes
 
     def contextMenuEvent(self, event) -> None:  # noqa: N802 - Qt API
+        if self._suppress_context_menu:
+            self._suppress_context_menu = False
+            event.accept()
+            return
         scene_point = self.mapToScene(event.pos())
         point = self.getPlotItem().vb.mapSceneToView(scene_point)
+        if not self._time_in_first_cycle(float(point.x())):
+            event.accept()
+            return
         menu = QMenu(self)
         add = QAction(f"Add point to {self.active_channel.upper()}", self)
         select_nearest = QAction(f"Select nearest {self.active_channel.upper()} point", self)
@@ -345,10 +394,33 @@ class WaveformEditor(pg.PlotWidget):
         super().mouseDoubleClickEvent(event)
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt API
+        if event.button() == Qt.RightButton:
+            scene_point = self.mapToScene(event.position().toPoint())
+            view_point = self.getPlotItem().vb.mapSceneToView(scene_point)
+            mode = "delete" if event.modifiers() & Qt.AltModifier else "add"
+            start_time = self._snap_time(float(view_point.x()))
+            if not self._time_in_first_cycle(start_time):
+                event.accept()
+                return
+            self._measurement_drag = (start_time, mode)
+            self._measurement_drag_moved = False
+            self.measurement_preview_region.setBrush(
+                pg.mkBrush(255, 92, 102, 70) if mode == "delete" else pg.mkBrush(255, 209, 102, 70)
+            )
+            self.measurement_preview_region.setRegion([start_time, start_time])
+            self.measurement_preview_region.show()
+            event.accept()
+            return
         if event.button() == Qt.LeftButton:
             scene_point = self.mapToScene(event.position().toPoint())
             view_point = self.getPlotItem().vb.mapSceneToView(scene_point)
             time_value = float(view_point.x())
+            if not self._time_in_first_cycle(time_value):
+                if event.modifiers() & (Qt.ControlModifier | Qt.AltModifier | Qt.ShiftModifier):
+                    event.accept()
+                    return
+                super().mousePressEvent(event)
+                return
             display_voltage = float(view_point.y())
             voltage = self._from_display_y(self.active_channel, display_voltage)
             if event.modifiers() & Qt.ControlModifier:
@@ -385,6 +457,21 @@ class WaveformEditor(pg.PlotWidget):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt API
+        if self._measurement_drag is not None:
+            start_time, mode = self._measurement_drag
+            scene_point = self.mapToScene(event.position().toPoint())
+            view_point = self.getPlotItem().vb.mapSceneToView(scene_point)
+            end_time = self._snap_time(float(view_point.x()))
+            self.measurement_preview_region.setRegion(sorted([start_time, end_time]))
+            self._measurement_drag_moved = abs(end_time - start_time) > max(self._active_snap_time(), 1e-12)
+            self.drag_info.setText(
+                f"{'Remove' if mode == 'delete' else 'Measure'}  "
+                f"{format_si(min(start_time, end_time), 's')} - {format_si(max(start_time, end_time), 's')}"
+            )
+            self.drag_info.setPos(min(start_time, end_time), float(view_point.y()))
+            self.drag_info.show()
+            event.accept()
+            return
         if self._segment_drag is not None:
             (
                 channel,
@@ -438,8 +525,8 @@ class WaveformEditor(pg.PlotWidget):
                 else:
                     left_t = left_t_start
                     right_t = right_t_start
-                    left_v_next = self._snap_voltage(left_v_start + delta_v)
-                    right_v_next = self._snap_voltage(right_v_start + delta_v)
+                    left_v_next = self._clamp_voltage(channel, self._snap_voltage(left_v_start + delta_v))
+                    right_v_next = self._clamp_voltage(channel, self._snap_voltage(right_v_start + delta_v))
                 points[left_index] = WaveformPoint(left_t, left_v_next)
                 points[right_index] = WaveformPoint(right_t, right_v_next)
                 self.project = next_project
@@ -453,6 +540,27 @@ class WaveformEditor(pg.PlotWidget):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt API
+        if self._measurement_drag is not None and event.button() == Qt.RightButton:
+            start_time, mode = self._measurement_drag
+            scene_point = self.mapToScene(event.position().toPoint())
+            view_point = self.getPlotItem().vb.mapSceneToView(scene_point)
+            end_time = self._snap_time(float(view_point.x()))
+            changed = self._measurement_drag_moved or abs(end_time - start_time) > max(self._active_snap_time(), 1e-12)
+            self._measurement_drag = None
+            self._measurement_drag_moved = False
+            self.measurement_preview_region.hide()
+            self.drag_info.hide()
+            if changed:
+                self._suppress_context_menu = True
+                start, end = sorted([start_time, end_time])
+                if mode == "delete":
+                    self._delete_measurement_range(start, end)
+                else:
+                    self._add_measurement_range(start, end)
+                event.accept()
+                return
+            self._suppress_context_menu = False
+            self.measurement_preview_region.hide()
         if self._segment_drag is not None:
             changed = self._segment_drag_changed
             self._segment_drag = None
@@ -477,6 +585,10 @@ class WaveformEditor(pg.PlotWidget):
             time_value = self._snap_time(time_value)
             voltage = self._snap_voltage(voltage)
         return max(0.0, time_value), voltage
+
+    def _clamp_voltage(self, channel: str, voltage: float) -> float:
+        low, high = force_range_limits(self.project.settings, channel)
+        return min(high, max(low, voltage))
 
     def _snap_time(self, time_value: float) -> float:
         if not self.project.settings.snap_enabled:
@@ -578,6 +690,7 @@ class WaveformEditor(pg.PlotWidget):
                 voltage = self._snap_voltage(voltage)
         else:
             time_value, voltage = self._snap(time_value, voltage)
+        voltage = self._clamp_voltage(channel, voltage)
         next_project.waveforms[channel][index] = WaveformPoint(time_value, voltage)
         # Do not sort during drag; stable point identity makes editing feel much
         # smoother. The final committed project is sorted in _finish_drag_point.
@@ -608,8 +721,12 @@ class WaveformEditor(pg.PlotWidget):
         self.projectChanged.emit(next_project)
 
     def _add_point(self, channel: str, time_value: float, voltage: float) -> None:
+        if not self._time_in_first_cycle(time_value):
+            log("WARN", "Ignored point outside first repeat cycle", detail=f"t={time_value:.6g}s")
+            return
         next_project = self.project.clone()
         time_value, voltage = self._snap(time_value, voltage)
+        voltage = self._clamp_voltage(channel, voltage)
         next_project.waveforms[channel].append(WaveformPoint(time_value, voltage))
         next_project.enforce_monotonic_waveforms(self._minimum_time_step())
         self.selected_point = self._find_point_after_repair(next_project, channel, time_value, voltage)
@@ -823,6 +940,9 @@ class WaveformEditor(pg.PlotWidget):
         self._delete_point(channel, index)
 
     def _insert_sharp_edge(self, channel: str, time_value: float, rising: bool) -> None:
+        if not self._time_in_first_cycle(time_value):
+            log("WARN", "Ignored sharp edge outside first repeat cycle", detail=f"t={time_value:.6g}s")
+            return
         points = self.project.waveforms[channel]
         low, high = self._edge_voltage_pair(channel)
         before_v, after_v = (low, high) if rising else (high, low)
@@ -916,6 +1036,102 @@ class WaveformEditor(pg.PlotWidget):
             high = low + 1.0
         return low, high
 
+    def _default_measurement_interval(self) -> float:
+        if self.project.settings.measurement_sampling_interval > 0:
+            return self.project.settings.measurement_sampling_interval
+        for event in reversed(self.project.measurements):
+            if event.interval > 0:
+                return event.interval
+        return 1e-6
+
+    def _default_measurement_averaging(self, interval: float) -> float:
+        for event in reversed(self.project.measurements):
+            if event.averaging >= 0:
+                return min(event.averaging, interval)
+        return interval
+
+    def _add_measurement_range(self, start_time: float, end_time: float) -> None:
+        cycle_end = self._first_cycle_duration()
+        start_time = max(0.0, min(cycle_end, start_time))
+        end_time = max(0.0, min(cycle_end, end_time))
+        if end_time <= start_time:
+            return
+        interval = self._default_measurement_interval()
+        points = max(1, int(np.floor((end_time - start_time) / interval)) + 1)
+        averaging = self._default_measurement_averaging(interval)
+        last = self.project.measurements[-1] if self.project.measurements else MeasurementEvent()
+        next_project = self.project.clone()
+        next_project.measurements.append(
+            MeasurementEvent(
+                tm=start_time,
+                points=points,
+                interval=interval,
+                averaging=averaging,
+                ch1_range=last.ch1_range,
+                ch2_range=last.ch2_range,
+            )
+        )
+        next_project.measurements.sort(key=lambda event: event.tm)
+        log("OK", "Measurement range added", detail=f"{start_time:.6g}s to {end_time:.6g}s")
+        self.projectChanged.emit(next_project)
+
+    def _delete_measurement_range(self, start_time: float, end_time: float) -> None:
+        cycle_end = self._first_cycle_duration()
+        start_time = max(0.0, min(cycle_end, start_time))
+        end_time = max(0.0, min(cycle_end, end_time))
+        if end_time <= start_time:
+            return
+        next_project = self.project.clone()
+        next_measurements: list[MeasurementEvent] = []
+        changed = False
+        for event in next_project.measurements:
+            split = self._subtract_measurement_range(event, start_time, end_time)
+            next_measurements.extend(split)
+            changed = changed or len(split) != 1 or split[0] != event
+        if not changed:
+            return
+        next_project.measurements = sorted(next_measurements, key=lambda item: item.tm)
+        log("OK", "Measurement range removed", detail=f"{start_time:.6g}s to {end_time:.6g}s")
+        self.projectChanged.emit(next_project)
+
+    def _subtract_measurement_range(
+        self, event: MeasurementEvent, delete_start: float, delete_end: float
+    ) -> list[MeasurementEvent]:
+        if event.points <= 0:
+            return [event]
+        interval = max(event.interval, 0.0)
+        if interval == 0.0:
+            return [] if delete_start <= event.tm <= delete_end else [event]
+        first_index = max(0, int(np.ceil((delete_start - event.tm) / interval)))
+        last_index = min(event.points - 1, int(np.floor((delete_end - event.tm) / interval)))
+        if last_index < 0 or first_index >= event.points or first_index > last_index:
+            return [event]
+        pieces: list[MeasurementEvent] = []
+        if first_index > 0:
+            pieces.append(
+                MeasurementEvent(
+                    tm=event.tm,
+                    points=first_index,
+                    interval=event.interval,
+                    averaging=event.averaging,
+                    ch1_range=event.ch1_range,
+                    ch2_range=event.ch2_range,
+                )
+            )
+        right_points = event.points - last_index - 1
+        if right_points > 0:
+            pieces.append(
+                MeasurementEvent(
+                    tm=event.tm + (last_index + 1) * interval,
+                    points=right_points,
+                    interval=event.interval,
+                    averaging=event.averaging,
+                    ch1_range=event.ch1_range,
+                    ch2_range=event.ch2_range,
+                )
+            )
+        return pieces
+
     def _draw_measurement_overlays(self) -> None:
         for item in self.measurement_items:
             self.removeItem(item)
@@ -924,16 +1140,53 @@ class WaveformEditor(pg.PlotWidget):
             self.measurement_sample_item.setData([], [])
             return
         for event in self.project.measurements:
-            line = pg.InfiniteLine(
+            start_time = event.tm
+            end_time = self._measurement_end_time(event)
+            display_end = end_time if end_time > start_time else start_time + self._minimum_visible_measurement_width()
+            region = pg.LinearRegionItem(
+                values=[start_time, display_end],
+                orientation="vertical",
+                movable=False,
+                brush=pg.mkBrush(68, 240, 122, 38),
+                pen=pg.mkPen(68, 240, 122, 80),
+            )
+            region.setZValue(-30)
+            region.setAcceptedMouseButtons(Qt.NoButton)
+            self.addItem(region, ignoreBounds=True)
+            self.measurement_items.append(region)
+            start_line = pg.InfiniteLine(
                 pos=event.tm,
                 angle=90,
                 movable=False,
                 pen=pg.mkPen("#ffd166", width=1.2, style=Qt.DotLine),
             )
-            self.addItem(line, ignoreBounds=True)
-            self.measurement_items.append(line)
+            self.addItem(start_line, ignoreBounds=True)
+            self.measurement_items.append(start_line)
+            if end_time > start_time:
+                end_line = pg.InfiniteLine(
+                    pos=end_time,
+                    angle=90,
+                    movable=False,
+                    pen=pg.mkPen("#44f07a", width=1.0, style=Qt.DotLine),
+                )
+                self.addItem(end_line, ignoreBounds=True)
+                self.measurement_items.append(end_line)
         sample_x, sample_y = self._measurement_sample_points()
         self.measurement_sample_item.setData(sample_x, sample_y)
+
+    def _measurement_end_time(self, event: MeasurementEvent) -> float:
+        return event.tm + max(0, int(event.points) - 1) * max(event.interval, 0.0)
+
+    def _first_cycle_duration(self) -> float:
+        return max(0.0, self.project.duration())
+
+    def _time_in_first_cycle(self, time_value: float) -> bool:
+        duration = self._first_cycle_duration()
+        return duration <= 0 or 0.0 <= time_value <= duration
+
+    def _minimum_visible_measurement_width(self) -> float:
+        x_min, x_max = self.getViewBox().viewRange()[0]
+        return max((x_max - x_min) * 0.002, self._minimum_time_step())
 
     def _measurement_sample_points(self) -> tuple[list[float], list[float]]:
         sample_x: list[float] = []

@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import json
+import re
+import urllib.error
+import urllib.request
 from pathlib import Path
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QIcon, QKeySequence, QUndoCommand, QUndoStack
+from PySide6.QtCore import QObject, Qt, QThread, QUrl, Signal
+from PySide6.QtGui import QAction, QDesktopServices, QIcon, QKeySequence, QUndoCommand, QUndoStack
 from PySide6.QtWidgets import (
+    QAbstractSpinBox,
     QApplication,
     QCheckBox,
     QComboBox,
@@ -16,6 +21,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QSpinBox,
@@ -25,8 +31,17 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core.app_info import (
+    APP_NAME,
+    APP_VERSION,
+    AUTHOR,
+    GITHUB_RELEASES_API,
+    GITHUB_TAGS_API,
+    GITHUB_URL,
+)
 from core.cli_log import log
 from core.models import Project
+from core.models import FORCE_RANGE_OPTIONS
 from core.project_io import (
     export_config_csv,
     export_measurements_csv,
@@ -62,6 +77,60 @@ class ProjectCommand(QUndoCommand):
         self.window.set_project(self.after, push_undo=False)
 
 
+class UpdateCheckWorker(QObject):
+    """Check GitHub releases/tags without blocking the UI thread."""
+
+    finished = Signal(bool, str, str)
+
+    def run(self) -> None:
+        try:
+            latest = self._latest_release_or_tag()
+            if not latest:
+                self.finished.emit(False, "No release or tag was found on GitHub.", "")
+                return
+            if _version_tuple(latest) > _version_tuple(APP_VERSION):
+                self.finished.emit(
+                    True,
+                    f"A newer version is available: {latest}\nCurrent version: {APP_VERSION}",
+                    GITHUB_URL,
+                )
+            else:
+                self.finished.emit(
+                    True,
+                    f"You are running the latest known version.\nCurrent version: {APP_VERSION}",
+                    GITHUB_URL,
+                )
+        except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
+            self.finished.emit(False, f"Could not check GitHub for updates:\n{exc}", GITHUB_URL)
+
+    def _latest_release_or_tag(self) -> str:
+        release = self._get_json(GITHUB_RELEASES_API)
+        if isinstance(release, dict):
+            tag = str(release.get("tag_name") or release.get("name") or "").strip()
+            if tag:
+                return tag
+        tags = self._get_json(GITHUB_TAGS_API)
+        if isinstance(tags, list) and tags:
+            return str(tags[0].get("name", "")).strip()
+        return ""
+
+    def _get_json(self, url: str):
+        request = urllib.request.Request(
+            url,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "User-Agent": f"{APP_NAME}/{APP_VERSION}",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=8) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+
+def _version_tuple(value: str) -> tuple[int, ...]:
+    numbers = re.findall(r"\d+", value)
+    return tuple(int(number) for number in numbers) if numbers else (0,)
+
+
 class MainWindow(QMainWindow):
     """Top-level application shell."""
 
@@ -76,6 +145,8 @@ class MainWindow(QMainWindow):
         self.current_path: Path | None = None
         self.validator = WGFMUValidator()
         self.undo_stack = QUndoStack(self)
+        self._update_thread: QThread | None = None
+        self._update_worker: UpdateCheckWorker | None = None
 
         self.editor = WaveformEditor()
         self.editor.projectChanged.connect(lambda project: self.set_project(project, text="Edit waveform"))
@@ -109,6 +180,7 @@ class MainWindow(QMainWindow):
         project.enforce_monotonic_waveforms(
             project.settings.minimum_point_spacing if project.settings.minimum_point_spacing > 0 else 1e-12
         )
+        project.enforce_force_ranges()
         if push_undo:
             log("INFO", text)
             self.undo_stack.push(ProjectCommand(self, self.project, project, text))
@@ -131,6 +203,10 @@ class MainWindow(QMainWindow):
         self.export_config_csv_action = QAction("Export Config CSV", self)
         self.import_meas_action = QAction("Import Measurement CSV", self)
         self.export_meas_action = QAction("Export Measurement CSV", self)
+        self.instructions_action = QAction("Operation Guide", self)
+        self.software_info_action = QAction("Software Info", self)
+        self.check_updates_action = QAction("Check GitHub for Updates", self)
+        self.open_github_action = QAction("Open GitHub Repository", self)
 
         self.new_action.setShortcut(QKeySequence.New)
         self.open_action.setShortcut(QKeySequence.Open)
@@ -144,6 +220,10 @@ class MainWindow(QMainWindow):
         self.export_config_csv_action.triggered.connect(self._export_config_csv)
         self.import_meas_action.triggered.connect(self._import_measurement_csv)
         self.export_meas_action.triggered.connect(self._export_measurement_csv)
+        self.instructions_action.triggered.connect(self._show_operation_guide)
+        self.software_info_action.triggered.connect(self._show_software_info)
+        self.check_updates_action.triggered.connect(self._check_for_updates)
+        self.open_github_action.triggered.connect(lambda: QDesktopServices.openUrl(QUrl(GITHUB_URL)))
 
         menubar = self.menuBar()
         file_menu = menubar.addMenu("File")
@@ -178,15 +258,24 @@ class MainWindow(QMainWindow):
         measurement_menu.addAction(self.import_meas_action)
         measurement_menu.addAction(self.export_meas_action)
 
+        about_menu = menubar.addMenu("About")
+        self._populate_about_menu(about_menu)
+
+    def _populate_about_menu(self, menu: QMenu) -> None:
+        menu.addAction(self.instructions_action)
+        menu.addAction(self.software_info_action)
+        menu.addSeparator()
+        menu.addAction(self.check_updates_action)
+        menu.addAction(self.open_github_action)
+
     def _build_docks(self) -> None:
-        left = QDockWidget("Project", self)
-        tabs = QTabWidget()
-        tabs.addTab(self._build_project_controls(), "Project")
-        tabs.addTab(self.editor_panel, "Editor")
-        tabs.addTab(self.template_panel, "Templates")
-        tabs.addTab(self.settings_panel, "Settings")
-        tabs.addTab(self.validation_panel, "Validation")
-        left.setWidget(tabs)
+        left = QDockWidget("Editor", self)
+        left.setMinimumWidth(100)
+        editor_tabs = QTabWidget()
+        editor_tabs.addTab(self.editor_panel, "Display")
+        editor_tabs.addTab(self.template_panel, "Templates")
+        editor_tabs.addTab(self.settings_panel, "Settings")
+        left.setWidget(editor_tabs)
         self.addDockWidget(Qt.LeftDockWidgetArea, left)
 
         bottom = QDockWidget("Measurement Events", self)
@@ -194,8 +283,13 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.BottomDockWidgetArea, bottom)
 
         points = QDockWidget("Waveform Points", self)
-        points.setWidget(self.point_table)
+        points.setMinimumWidth(100)
+        waveform_tabs = QTabWidget()
+        waveform_tabs.addTab(self.point_table, "Points")
+        waveform_tabs.addTab(self.validation_panel, "Validation")
+        points.setWidget(waveform_tabs)
         self.addDockWidget(Qt.RightDockWidgetArea, points)
+        self.resizeDocks([left, points], [140, 140], Qt.Horizontal)
 
     def _build_project_controls(self) -> QWidget:
         widget = QWidget()
@@ -299,20 +393,31 @@ class MainWindow(QMainWindow):
         widget = QWidget()
         self.repeat_spin = QSpinBox()
         self.repeat_spin.setRange(1, 1_000_000)
+        self._style_numeric_control(self.repeat_spin)
         self.viz_check = QCheckBox("Waveform timing visualization")
         self.snap_check = QCheckBox("Snap to grid")
         self.smart_snap_check = QCheckBox("Smart nice-number snap")
         self.snap_time = self._double(0.0, 1e15, 1.0, 1.0, 6)
         self.snap_voltage = self._double(0.0, 1e9, 10.0, 1.0, 6)
         self.minimum_spacing = SIInput(100e-9, 1e-15, 1e9, "s")
-        self.range_ch1 = self._double(0.0, 1000.0, 10.0, 1.0, 6)
-        self.range_ch2 = self._double(0.0, 1000.0, 10.0, 1.0, 6)
+        self._style_numeric_control(self.minimum_spacing)
+        self.range_ch1 = QComboBox()
+        self.range_ch2 = QComboBox()
+        self._style_numeric_control(self.range_ch1)
+        self._style_numeric_control(self.range_ch2)
+        for key, (label, _low, _high) in FORCE_RANGE_OPTIONS.items():
+            self.range_ch1.addItem(label, key)
+            self.range_ch2.addItem(label, key)
         self.guard = self._double(0.0, 1e15, 1.0, 1.0, 6)
         self.snap_time.setSuffix(" us")
         self.snap_voltage.setSuffix(" mV")
         self.guard.setSuffix(" us")
 
         form = QFormLayout(widget)
+        form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        form.setFormAlignment(Qt.AlignTop)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(9)
         form.addRow("RepeatCount", self.repeat_spin)
         form.addRow("", self.viz_check)
         form.addRow("", self.snap_check)
@@ -320,8 +425,8 @@ class MainWindow(QMainWindow):
         form.addRow("Snap Time [us]", self.snap_time)
         form.addRow("Snap Voltage [mV]", self.snap_voltage)
         form.addRow("Min Point Spacing [s]", self.minimum_spacing)
-        form.addRow("Ch1 VForceRange [V]", self.range_ch1)
-        form.addRow("Ch2 VForceRange [V]", self.range_ch2)
+        form.addRow("Ch1 Force Range", self.range_ch1)
+        form.addRow("Ch2 Force Range", self.range_ch2)
         form.addRow("Switch Guard [us]", self.guard)
         for control in [
             self.repeat_spin,
@@ -335,7 +440,9 @@ class MainWindow(QMainWindow):
             self.range_ch2,
             self.guard,
         ]:
-            if hasattr(control, "valueChanged"):
+            if hasattr(control, "currentIndexChanged"):
+                control.currentIndexChanged.connect(self._settings_changed)
+            elif hasattr(control, "valueChanged"):
                 control.valueChanged.connect(self._settings_changed)
             else:
                 control.stateChanged.connect(self._settings_changed)
@@ -347,7 +454,15 @@ class MainWindow(QMainWindow):
         spin.setValue(value)
         spin.setSingleStep(step)
         spin.setDecimals(decimals)
+        self._style_numeric_control(spin)
         return spin
+
+    def _style_numeric_control(self, control: QWidget) -> None:
+        control.setMinimumHeight(30)
+        control.setProperty("settingsControl", True)
+        if isinstance(control, QAbstractSpinBox):
+            control.setButtonSymbols(QAbstractSpinBox.NoButtons)
+            control.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
     def _settings_changed(self) -> None:
         next_project = self.project.clone()
@@ -358,8 +473,8 @@ class MainWindow(QMainWindow):
         next_project.settings.snap_time = self.snap_time.value() * 1e-6
         next_project.settings.snap_voltage = self.snap_voltage.value() * 1e-3
         next_project.settings.minimum_point_spacing = self.minimum_spacing.value()
-        next_project.settings.vforce_range_ch1 = self.range_ch1.value()
-        next_project.settings.vforce_range_ch2 = self.range_ch2.value()
+        next_project.settings.force_range_mode_ch1 = self.range_ch1.currentData()
+        next_project.settings.force_range_mode_ch2 = self.range_ch2.currentData()
         next_project.settings.range_switch_guard_s = self.guard.value() * 1e-6
         log("INFO", "Settings changed")
         self.set_project(next_project, text="Edit settings")
@@ -396,8 +511,10 @@ class MainWindow(QMainWindow):
         self.snap_time.setValue(settings.snap_time * 1e6)
         self.snap_voltage.setValue(settings.snap_voltage * 1e3)
         self.minimum_spacing.setValue(settings.minimum_point_spacing)
-        self.range_ch1.setValue(settings.vforce_range_ch1)
-        self.range_ch2.setValue(settings.vforce_range_ch2)
+        ch1_index = self.range_ch1.findData(settings.force_range_mode_ch1)
+        ch2_index = self.range_ch2.findData(settings.force_range_mode_ch2)
+        self.range_ch1.setCurrentIndex(max(0, ch1_index))
+        self.range_ch2.setCurrentIndex(max(0, ch2_index))
         self.guard.setValue(settings.range_switch_guard_s * 1e6)
         for control in [
             self.repeat_spin,
@@ -496,29 +613,231 @@ class MainWindow(QMainWindow):
             export_measurements_csv(path, self.project)
             log("OK", "Measurement CSV exported", detail=path)
 
+    def _show_operation_guide(self) -> None:
+        QMessageBox.information(
+            self,
+            "Operation Guide",
+            "\n".join(
+                [
+                    "Waveform editing:",
+                    "- Ctrl + left click: add a point to the active channel.",
+                    "- Alt + left click: delete a nearby point or flip a sharp edge.",
+                    "- Shift + drag: move a point or selected segment.",
+                    "- Right click: open waveform editing commands.",
+                    "",
+                    "Measurement ranges:",
+                    "- Right drag on the plot: create a measurement time range.",
+                    "- Alt + right drag: remove part of an existing measurement range.",
+                    "- Measurement ranges are shown as highlighted background bands and stay synchronized with the table.",
+                    "",
+                    "Export:",
+                    "- Use Export WGFMU Text for Pattern Editor paste text.",
+                    "- Use CSV actions for waveform, measurement, or combined config data.",
+                ]
+            ),
+        )
+
+    def _show_software_info(self) -> None:
+        QMessageBox.information(
+            self,
+            "Software Info",
+            f"{APP_NAME}\nVersion: {APP_VERSION}\nAuthor: {AUTHOR}\nGitHub: {GITHUB_URL}",
+        )
+
+    def _check_for_updates(self) -> None:
+        if self._update_thread is not None:
+            self.statusBar().showMessage("Update check is already running...", 3000)
+            return
+        self.check_updates_action.setEnabled(False)
+        self.statusBar().showMessage("Checking GitHub for updates...", 3000)
+        self._update_thread = QThread(self)
+        self._update_worker = UpdateCheckWorker()
+        self._update_worker.moveToThread(self._update_thread)
+        self._update_thread.started.connect(self._update_worker.run)
+        self._update_worker.finished.connect(self._update_check_finished)
+        self._update_worker.finished.connect(self._update_thread.quit)
+        self._update_worker.finished.connect(self._update_worker.deleteLater)
+        self._update_thread.finished.connect(self._update_thread.deleteLater)
+        self._update_thread.finished.connect(self._clear_update_worker)
+        self._update_thread.start()
+
+    def _update_check_finished(self, ok: bool, message: str, url: str) -> None:
+        title = "Update Check" if ok else "Update Check Failed"
+        box = QMessageBox(self)
+        box.setWindowTitle(title)
+        box.setText(message)
+        box.setIcon(QMessageBox.Information if ok else QMessageBox.Warning)
+        open_button = None
+        if url:
+            open_button = box.addButton("Open GitHub", QMessageBox.ActionRole)
+        box.addButton(QMessageBox.Ok)
+        box.exec()
+        if open_button is not None and box.clickedButton() == open_button:
+            QDesktopServices.openUrl(QUrl(url))
+        log("OK" if ok else "WARN", "GitHub update check finished", detail=message.replace("\n", " "))
+
+    def _clear_update_worker(self) -> None:
+        self.check_updates_action.setEnabled(True)
+        self._update_thread = None
+        self._update_worker = None
+
     def _update_cursor(self, time_value: float, voltage: float) -> None:
         self.statusBar().showMessage(f"Cursor: t={time_value:.6g} s, V={voltage:.6g} V")
 
     def _apply_theme(self) -> None:
         QApplication.instance().setStyleSheet(
             """
-            QMainWindow, QWidget { background: #171b22; color: #d8dee9; }
-            QDockWidget::title { background: #222833; padding: 5px; }
-            QMenuBar, QMenu, QStatusBar { background: #1f2530; color: #d8dee9; }
+            QMainWindow, QWidget {
+                background: #171b22;
+                color: #d8dee9;
+                font-size: 12px;
+            }
+            QDockWidget::title {
+                background: #222833;
+                padding: 5px 8px;
+                border-bottom: 1px solid #303846;
+            }
+            QMenuBar, QMenu, QStatusBar {
+                background: #1f2530;
+                color: #d8dee9;
+            }
+            QMenuBar::item {
+                padding: 4px 8px;
+            }
+            QMenu::item {
+                padding: 5px 22px 5px 18px;
+            }
+            QMenu::item:selected {
+                background: #2f4056;
+            }
             QCheckBox::indicator {
                 width: 14px; height: 14px; border: 1px solid #64748b; background: #0f1720;
+                border-radius: 3px;
             }
             QCheckBox::indicator:checked {
                 background: #4ea1ff; border-color: #9dccff;
             }
-            QPushButton { background: #2a3240; border: 1px solid #3b4658; padding: 6px; border-radius: 4px; }
-            QPushButton:hover { background: #344052; }
+            QRadioButton {
+                spacing: 4px;
+                padding: 2px 3px;
+            }
+            QRadioButton::indicator {
+                width: 11px;
+                height: 11px;
+                border-radius: 6px;
+                border: 1px solid #64748b;
+                background: #0f1720;
+            }
+            QRadioButton::indicator:checked {
+                border: 3px solid #4ea1ff;
+                background: #cfe6ff;
+            }
+            QPushButton {
+                background: #293241;
+                border: 1px solid #3a4658;
+                padding: 4px 10px;
+                border-radius: 5px;
+                min-height: 22px;
+            }
+            QPushButton:hover { background: #344052; border-color: #50627a; }
+            QPushButton:pressed { background: #223047; }
             QPushButton:checked { background: #355f92; border-color: #4ea1ff; }
             QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QPlainTextEdit, QTableWidget, QListWidget {
-                background: #11151c; color: #d8dee9; border: 1px solid #303846; selection-background-color: #355f92;
+                background: #11151c;
+                color: #d8dee9;
+                border: 1px solid #303846;
+                selection-background-color: #355f92;
+                selection-color: #ffffff;
             }
-            QHeaderView::section { background: #242b36; color: #d8dee9; padding: 4px; border: 1px solid #303846; }
-            QTabBar::tab { background: #222833; padding: 6px 10px; border: 1px solid #303846; }
-            QTabBar::tab:selected { background: #303846; }
+            QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {
+                min-height: 22px;
+                border-radius: 5px;
+                padding: 3px 8px;
+            }
+            QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {
+                border-color: #5aa9ff;
+                background: #151d28;
+            }
+            QComboBox::drop-down {
+                width: 24px;
+                border: none;
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+            }
+            QComboBox::down-arrow {
+                width: 0px;
+                height: 0px;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 5px solid #9fb2c3;
+                margin-right: 8px;
+            }
+            QComboBox QAbstractItemView {
+                background: #11151c;
+                color: #d8dee9;
+                border: 1px solid #3a4658;
+                selection-background-color: #355f92;
+            }
+            QLineEdit[settingsControl="true"], QSpinBox[settingsControl="true"],
+            QDoubleSpinBox[settingsControl="true"], QComboBox[settingsControl="true"] {
+                background: #121821;
+                border: 1px solid #3a4658;
+                border-radius: 6px;
+                padding: 4px 10px;
+                min-height: 22px;
+            }
+            QLineEdit[settingsControl="true"]:focus, QSpinBox[settingsControl="true"]:focus,
+            QDoubleSpinBox[settingsControl="true"]:focus, QComboBox[settingsControl="true"]:focus {
+                border: 1px solid #5aa9ff;
+                background: #151d28;
+            }
+            QSpinBox[settingsControl="true"]::up-button, QSpinBox[settingsControl="true"]::down-button,
+            QDoubleSpinBox[settingsControl="true"]::up-button, QDoubleSpinBox[settingsControl="true"]::down-button {
+                width: 0px;
+                border: none;
+            }
+            QComboBox[settingsControl="true"]::drop-down {
+                width: 24px;
+                border: none;
+            }
+            QComboBox[settingsControl="true"]::down-arrow {
+                width: 0px;
+                height: 0px;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 5px solid #9fb2c3;
+                margin-right: 8px;
+            }
+            QTableWidget, QListWidget {
+                gridline-color: #27313f;
+                alternate-background-color: #141a23;
+                border-radius: 5px;
+            }
+            QTableWidget::item, QListWidget::item {
+                padding: 3px 5px;
+            }
+            QTableWidget::item:selected, QListWidget::item:selected {
+                background: #355f92;
+                color: #ffffff;
+            }
+            QHeaderView::section {
+                background: #242b36;
+                color: #d8dee9;
+                padding: 4px 6px;
+                border: 1px solid #303846;
+            }
+            QTabBar::tab {
+                background: #222833;
+                padding: 5px 9px;
+                border: 1px solid #303846;
+                border-bottom-color: #242b36;
+            }
+            QTabBar::tab:selected {
+                background: #303846;
+                border-color: #435168;
+            }
+            QTabBar::tab:hover {
+                background: #2a3342;
+            }
             """
         )

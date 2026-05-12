@@ -38,14 +38,15 @@ class WaveformPointTable(QWidget):
         self.channel_box.addItems(["CH1", "CH2"])
         self.channel_box.currentIndexChanged.connect(self._channel_changed)
 
-        self.add_button = QPushButton("Add Point")
-        self.delete_button = QPushButton("Delete Selected")
-        self.copy_button = QPushButton("Copy WGFMU Text")
+        self.add_button = QPushButton("Add")
+        self.delete_button = QPushButton("Delete")
+        self.copy_button = QPushButton("Copy")
         self.add_button.clicked.connect(self._add_point)
         self.delete_button.clicked.connect(self._delete_selected)
         self.copy_button.clicked.connect(self._copy_waveform)
 
         top = QHBoxLayout()
+        top.setSpacing(6)
         top.addWidget(self.channel_box)
         top.addWidget(self.add_button)
         top.addWidget(self.delete_button)
@@ -55,9 +56,12 @@ class WaveformPointTable(QWidget):
         self.table.setHorizontalHeaderLabels(self.HEADERS)
         self.table.itemChanged.connect(self._item_changed)
         self.table.verticalHeader().setVisible(True)
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setDefaultSectionSize(24)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
         layout.addLayout(top)
         layout.addWidget(self.table)
 

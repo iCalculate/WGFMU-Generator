@@ -69,6 +69,21 @@ Measurement rows are exported as:
 tm	Points	Interval	Averaging	Ch1 Range	Ch2 Range
 ```
 
+`Ch1 Range` and `Ch2 Range` are WGFMU range-event columns and default to `0`,
+which leaves the normal current measurement range unchanged. Set a value from
+`1` to `5` only when a range event is needed: `1 = 1 uA`, `2 = 10 uA`,
+`3 = 100 uA`, `4 = 1 mA`, and `5 = 10 mA`.
+
+In the plot, right-drag across the waveform to create a measurement time range.
+The drag endpoints follow the time snap setting and the highlighted background
+area stays synchronized with the measurement table. Use `Alt+Right Drag` to
+remove part of an existing measurement range; this can split one table row into
+two rows when the removed time window is in the middle.
+
+The measurement panel sampling buttons (`10n` through `1s`) set the default
+`Interval` and `Averaging` for measurement ranges or rows created after the
+selection changes. Existing measurement rows are not modified.
+
 Numeric template fields accept engineering prefixes such as `1n`, `20u`,
 `1m`, `1k`, `2.5M`, and scientific notation such as `2E-05`.
 
@@ -94,6 +109,14 @@ The live validator reports:
 - Measurement start too close to waveform/range switches
 - Invalid repeat count
 - Measurement event outside waveform duration
+
+When `RepeatCount` is greater than `1`, the plot shows repeated cycles after
+the editable first cycle as low-contrast line-only waveforms. Waveform and
+measurement edits are limited to the first cycle.
+
+Channel force range is selected from fixed ranges: `+/-3 V`, `+/-5 V`,
+`0 to 10 V`, and `-10 to 0 V`. Waveform voltages are clamped to the selected
+range and validation reports any out-of-range data.
 
 Total measurement points are calculated as:
 

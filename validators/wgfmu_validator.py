@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from core.models import CHANNELS, Project
+from core.models import CHANNELS, Project, force_range_limits
 
 
 @dataclass(frozen=True)
@@ -29,10 +29,6 @@ class WGFMUValidator:
 
     def _validate_waveforms(self, project: Project) -> list[ValidationMessage]:
         messages: list[ValidationMessage] = []
-        ranges = {
-            "ch1": abs(project.settings.vforce_range_ch1),
-            "ch2": abs(project.settings.vforce_range_ch2),
-        }
         for channel in CHANNELS:
             points = project.waveforms[channel]
             if not points:
@@ -48,11 +44,12 @@ class WGFMUValidator:
                         f"{channel.upper()} waveform time must be strictly monotonic.",
                     )
                 )
-            if np.any(np.abs(voltages) > ranges[channel]):
+            low, high = force_range_limits(project.settings, channel)
+            if np.any((voltages < low) | (voltages > high)):
                 messages.append(
                     ValidationMessage(
                         "error",
-                        f"{channel.upper()} voltage exceeds VForceRange (+/-{ranges[channel]:g} V).",
+                        f"{channel.upper()} voltage exceeds Force Range ({low:g} to {high:g} V).",
                     )
                 )
             if np.any(times < 0):
